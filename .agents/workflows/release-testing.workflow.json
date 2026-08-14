@@ -1,0 +1,27 @@
+{
+  "schema_version": "workflow-definition/v1",
+  "workflow_id": "release-testing",
+  "initial_node": "scope_release",
+  "required_gates": ["release_approval"],
+  "nodes": [
+    {"id": "scope_release", "type": "task", "role_id": "orchestrator", "requires": ["release_reference"], "produces": ["release_scope", "sources_of_record"]},
+    {"id": "execute", "type": "task", "role_id": "test_executor", "requires": ["release_scope"], "produces": ["test_evidence"]},
+    {"id": "parse", "type": "task", "role_id": "release_parser", "requires": ["test_evidence"], "produces": ["structured_failure_evidence"]},
+    {"id": "triage", "type": "task", "role_id": "failure_triage_analyst", "requires": ["structured_failure_evidence"], "produces": ["failure_triage"]},
+    {"id": "verify", "type": "task", "role_id": "adversarial_verifier", "requires": ["release_scope", "test_evidence", "failure_triage"], "produces": ["verifier_result"]},
+    {"id": "release_gate", "type": "gate", "gate_type": "release_approval", "requires": ["release_scope", "test_evidence", "verifier_result"], "produces": ["gate_record"]},
+    {"id": "knowledge_closeout", "type": "task", "role_id": "knowledge_curator", "requires": ["gate_record"], "produces": ["knowledge_curation"]},
+    {"id": "completed", "type": "terminal", "state": "COMPLETED", "requires": ["gate_record"], "produces": []}
+  ],
+  "transitions": [
+    {"from": "scope_release", "to": "execute", "on": "success"},
+    {"from": "execute", "to": "parse", "on": "success"},
+    {"from": "execute", "to": "parse", "on": "failure"},
+    {"from": "parse", "to": "triage", "on": "success"},
+    {"from": "triage", "to": "verify", "on": "success"},
+    {"from": "verify", "to": "release_gate", "on": "success"},
+    {"from": "release_gate", "to": "knowledge_closeout", "on": "approved"},
+    {"from": "release_gate", "to": "completed", "on": "rejected"},
+    {"from": "knowledge_closeout", "to": "completed", "on": "success"}
+  ]
+}

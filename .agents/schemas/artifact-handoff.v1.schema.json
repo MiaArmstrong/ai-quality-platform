@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "artifact-handoff/v1", "type": "object",
+  "required": ["schema_version", "artifact_id", "artifact_type", "workflow_run_id", "producer", "created_at", "content", "content_hash", "provenance"],
+  "properties": {
+    "schema_version": {"const": "artifact-handoff/v1"}, "artifact_id": {"type": "string", "minLength": 1}, "artifact_type": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "workflow_run_id": {"type": "string", "minLength": 1}, "task_id": {"type": ["string", "null"]}, "producer": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"}, "content": {}, "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "provenance": {"type": "array", "items": {"type": "string"}},
+    "supersedes": {"type": ["string", "null"]}
+  }, "additionalProperties": false
+}

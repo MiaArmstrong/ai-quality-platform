@@ -1,0 +1,25 @@
+{
+  "schema_version": "workflow-definition/v1",
+  "workflow_id": "qa",
+  "initial_node": "intake",
+  "required_gates": ["qa_signoff"],
+  "nodes": [
+    {"id": "intake", "type": "task", "role_id": "intake_analyst", "requires": ["work_item"], "produces": ["qa_intake", "sources_of_record"]},
+    {"id": "execute", "type": "task", "role_id": "test_executor", "requires": ["qa_intake"], "produces": ["test_evidence"]},
+    {"id": "verify", "type": "task", "role_id": "adversarial_verifier", "requires": ["test_evidence"], "produces": ["verifier_result"]},
+    {"id": "triage", "type": "task", "role_id": "failure_triage_analyst", "requires": ["test_evidence"], "produces": ["failure_triage"]},
+    {"id": "qa_signoff", "type": "gate", "gate_type": "qa_signoff", "requires": ["verifier_result"], "produces": ["gate_record"]},
+    {"id": "knowledge_closeout", "type": "task", "role_id": "knowledge_curator", "requires": ["gate_record"], "produces": ["knowledge_curation"]},
+    {"id": "completed", "type": "terminal", "state": "COMPLETED", "requires": ["gate_record"], "produces": []}
+  ],
+  "transitions": [
+    {"from": "intake", "to": "execute", "on": "success"},
+    {"from": "execute", "to": "verify", "on": "success"},
+    {"from": "execute", "to": "triage", "on": "failure"},
+    {"from": "triage", "to": "verify", "on": "success"},
+    {"from": "verify", "to": "qa_signoff", "on": "success"},
+    {"from": "qa_signoff", "to": "knowledge_closeout", "on": "approved"},
+    {"from": "qa_signoff", "to": "completed", "on": "rejected"},
+    {"from": "knowledge_closeout", "to": "completed", "on": "success"}
+  ]
+}

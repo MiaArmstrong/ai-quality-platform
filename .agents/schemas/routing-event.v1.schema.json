@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "routing-event/v1", "type": "object",
+  "required": ["schema_version", "event_id", "workflow_run_id", "workflow_id", "task_id", "role_id", "requested_tier", "selected_tier", "reason_code", "transition", "attempt", "timestamp"],
+  "properties": {
+    "schema_version": {"const": "routing-event/v1"}, "event_id": {"type": "string"}, "workflow_run_id": {"type": "string"}, "workflow_id": {"type": "string"}, "task_id": {"type": "string"},
+    "role_id": {"type": "string"}, "requested_tier": {"type": "string"}, "selected_tier": {"type": "string"}, "reason_code": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1},
+    "tokens_in": {"type": ["integer", "null"], "minimum": 0}, "tokens_out": {"type": ["integer", "null"], "minimum": 0}, "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+    "transition": {"enum": ["initial", "escalate", "deescalate", "none"]}, "from_tier": {"type": ["string", "null"]}, "transition_reason": {"type": ["string", "null"]},
+    "verifier_verdict": {"type": ["string", "null"]}, "timestamp": {"type": "string", "format": "date-time"}
+  }, "additionalProperties": false
+}
