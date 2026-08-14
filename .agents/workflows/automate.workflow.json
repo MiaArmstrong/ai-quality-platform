@@ -1,0 +1,34 @@
+{
+  "schema_version": "workflow-definition/v1",
+  "workflow_id": "automate",
+  "initial_node": "design",
+  "required_gates": ["design_approval", "release_approval"],
+  "nodes": [
+    {"id": "design", "type": "task", "role_id": "architect", "requires": ["work_item"], "produces": ["automation_design", "sources_of_record"]},
+    {"id": "design_critique", "type": "task", "role_id": "adversarial_verifier", "requires": ["automation_design"], "produces": ["adversarial_review"]},
+    {"id": "design_gate", "type": "gate", "gate_type": "design_approval", "requires": ["automation_design", "adversarial_review"], "produces": ["human_gate_evidence"]},
+    {"id": "implement", "type": "task", "role_id": "implementer", "requires": ["automation_design", "human_gate_evidence"], "produces": ["implementation_result"]},
+    {"id": "execute", "type": "task", "role_id": "test_executor", "requires": ["implementation_result"], "produces": ["test_execution_result"]},
+    {"id": "verify", "type": "task", "role_id": "adversarial_verifier", "requires": ["implementation_result", "test_execution_result"], "produces": ["verifier_result"]},
+    {"id": "triage", "type": "task", "role_id": "failure_triage_analyst", "requires": ["test_execution_result"], "produces": ["failure_triage"]},
+    {"id": "release_gate", "type": "gate", "gate_type": "release_approval", "requires": ["implementation_result", "test_execution_result", "verifier_result"], "produces": ["human_gate_evidence"]},
+    {"id": "release_rework", "type": "state", "state": "REWORK_REQUIRED", "requires": ["human_gate_evidence"], "produces": []},
+    {"id": "knowledge_closeout", "type": "task", "role_id": "knowledge_curator", "requires": ["human_gate_evidence"], "produces": ["knowledge_curation_result"]},
+    {"id": "completed", "type": "terminal", "state": "COMPLETED", "requires": ["human_gate_evidence"], "produces": []}
+  ],
+  "transitions": [
+    {"from": "design", "to": "design_critique", "on": "success"},
+    {"from": "design_critique", "to": "design_gate", "on": "success"},
+    {"from": "design_gate", "to": "implement", "on": "approved"},
+    {"from": "design_gate", "to": "design", "on": "rejected"},
+    {"from": "implement", "to": "execute", "on": "success"},
+    {"from": "execute", "to": "verify", "on": "success"},
+    {"from": "execute", "to": "triage", "on": "failure"},
+    {"from": "triage", "to": "verify", "on": "success"},
+    {"from": "verify", "to": "release_gate", "on": "success"},
+    {"from": "release_gate", "to": "knowledge_closeout", "on": "approved"},
+    {"from": "release_gate", "to": "release_rework", "on": "rejected"},
+    {"from": "release_rework", "to": "implement", "on": "rework"},
+    {"from": "knowledge_closeout", "to": "completed", "on": "success"}
+  ]
+}

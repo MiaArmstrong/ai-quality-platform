@@ -1,0 +1,22 @@
+{
+  "schema_version": "artifact-types/v1",
+  "artifact_types": [
+    "work_item",
+    "sources_of_record",
+    "automation_design",
+    "adversarial_review",
+    "implementation_result",
+    "test_execution_result",
+    "failure_triage",
+    "verifier_result",
+    "knowledge_curation_result",
+    "human_gate_evidence",
+    "qa_intake",
+    "release_reference",
+    "release_scope",
+    "structured_failure_evidence",
+    "test_evidence",
+    "gate_record",
+    "knowledge_curation"
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agent-registry/v1",
+  "type": "object",
+  "required": ["schema_version", "registry_id", "artifact_types_file", "default_authorization_policy", "authorization_policies", "enums", "routing_policy", "standards", "skills", "agents", "escalation_rules", "workflows", "schemas", "telemetry"],
+  "properties": {
+    "schema_version": {"const": "agent-registry/v1"},
+    "registry_id": {"$ref": "#/$defs/id"},
+    "artifact_types_file": {"type": "string"},
+    "default_authorization_policy": {"$ref": "#/$defs/id"},
+    "authorization_policies": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "required": ["allowed_capabilities", "denied_capabilities"], "properties": {"allowed_capabilities": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}, "denied_capabilities": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}, "additionalProperties": false}},
+    "enums": {
+      "type": "object",
+      "required": ["tiers", "verifier_verdicts", "gate_types"],
+      "properties": {
+        "tiers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "verifier_verdicts": {"const": ["SUPPORTED", "SUPPORTED_WITH_CONCERNS", "REFUTED", "INSUFFICIENT_EVIDENCE"]},
+        "gate_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "additionalProperties": false
+    },
+    "routing_policy": {
+      "type": "object",
+      "required": ["principle", "tiers", "allowed_transitions"],
+      "properties": {
+        "principle": {"type": "string", "minLength": 1},
+        "tiers": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "required": ["description"], "properties": {"description": {"type": "string"}}, "additionalProperties": false}},
+        "allowed_transitions": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}
+      },
+      "additionalProperties": false
+    },
+    "standards": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "required": ["standard_file"], "properties": {"standard_file": {"type": "string"}}, "additionalProperties": false}},
+    "skills": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/skill"}},
+    "agents": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/agent"}},
+    "escalation_rules": {"type": "array", "items": {"type": "object", "required": ["condition", "action"], "properties": {"condition": {"$ref": "#/$defs/id"}, "action": {"enum": ["escalate", "deescalate"]}}, "additionalProperties": false}},
+    "workflows": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "required": ["definition_file"], "properties": {"definition_file": {"type": "string"}}, "additionalProperties": false}},
+    "schemas": {"type": "object", "required": ["agent_registry", "artifact_types", "workflow_definition", "artifact_handoff", "routing_event", "human_gate"], "additionalProperties": {"type": "string"}},
+    "telemetry": {"type": "object", "required": ["enabled", "fields"], "properties": {"enabled": {"type": "boolean"}, "fields": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}, "additionalProperties": false}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*(?:/[a-z0-9_-]+)?$"},
+    "dependencies": {"type": "object", "required": ["skills", "standards"], "properties": {"skills": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}, "standards": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}, "additionalProperties": false},
+    "skill": {"type": "object", "required": ["skill_file", "invocation", "standalone", "dependencies"], "properties": {"skill_file": {"type": "string"}, "invocation": {"enum": ["user", "orchestrated"]}, "standalone": {"type": "boolean"}, "dependencies": {"$ref": "#/$defs/dependencies"}}, "additionalProperties": false},
+    "agent": {"type": "object", "required": ["role_file", "default_tier", "skills", "escalation_tier"], "properties": {"role_file": {"type": "string"}, "default_tier": {"$ref": "#/$defs/id"}, "skills": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}, "standards": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}, "escalation_tier": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}}, "additionalProperties": false}
+  },
+  "additionalProperties": false
+}

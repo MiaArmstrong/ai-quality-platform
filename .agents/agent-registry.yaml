@@ -1,0 +1,228 @@
+schema_version: "agent-registry/v1"
+registry_id: "ai-quality-platform"
+artifact_types_file: ".agents/artifact-types.v1.json"
+default_authorization_policy: "mock_read_only"
+
+enums:
+  tiers: ["economy", "standard", "high_reasoning"]
+  verifier_verdicts:
+    - "SUPPORTED"
+    - "SUPPORTED_WITH_CONCERNS"
+    - "REFUTED"
+    - "INSUFFICIENT_EVIDENCE"
+  gate_types: ["design_approval", "qa_signoff", "release_approval"]
+
+routing_policy:
+  principle: "Use the least-expensive model tier that can reliably perform the task."
+  tiers:
+    high_reasoning:
+      description: "Complex reasoning, architecture, adversarial review, ambiguity resolution."
+    standard:
+      description: "Implementation, QA analysis, requirements analysis, accessibility, ordinary triage."
+    economy:
+      description: "Mechanical execution, structured extraction, summarization, curation, indexing."
+  allowed_transitions:
+    economy: ["standard"]
+    standard: ["economy", "high_reasoning"]
+    high_reasoning: ["standard"]
+
+authorization_policies:
+  mock_read_only:
+    allowed_capabilities: ["read_contracts", "emit_artifacts"]
+    denied_capabilities: ["network", "external_write", "destructive_action"]
+
+standards:
+  adversarial-verification:
+    standard_file: ".agents/standards/adversarial-verification.md"
+  definition-of-done:
+    standard_file: ".agents/standards/definition-of-done.md"
+  definition-of-ready:
+    standard_file: ".agents/standards/definition-of-ready.md"
+  given-when-then:
+    standard_file: ".agents/standards/given-when-then.md"
+  invest:
+    standard_file: ".agents/standards/invest.md"
+  knowledge-governance:
+    standard_file: ".agents/standards/knowledge-governance.md"
+  severity-vs-priority:
+    standard_file: ".agents/standards/severity-vs-priority.md"
+
+skills:
+  write-ticket:
+    skill_file: ".agents/skills/write-ticket/SKILL.md"
+    invocation: "user"
+    standalone: true
+    dependencies:
+      skills: []
+      standards: ["definition-of-done", "definition-of-ready", "given-when-then", "invest", "severity-vs-priority"]
+  requirements-readiness:
+    skill_file: ".agents/skills/requirements-readiness/SKILL.md"
+    invocation: "orchestrated"
+    standalone: false
+    dependencies:
+      skills: []
+      standards: ["definition-of-done", "definition-of-ready", "given-when-then", "invest", "severity-vs-priority"]
+  qa-ticket-intake:
+    skill_file: ".agents/skills/qa-ticket-intake/SKILL.md"
+    invocation: "orchestrated"
+    standalone: false
+    dependencies:
+      skills: ["requirements-readiness"]
+      standards: ["knowledge-governance"]
+  failure-triage:
+    skill_file: ".agents/skills/failure-triage/SKILL.md"
+    invocation: "orchestrated"
+    standalone: false
+    dependencies:
+      skills: []
+      standards: ["adversarial-verification"]
+  knowledge-curation:
+    skill_file: ".agents/skills/knowledge-curation/SKILL.md"
+    invocation: "orchestrated"
+    standalone: false
+    dependencies:
+      skills: []
+      standards: ["knowledge-governance"]
+  qa-agent-team:
+    skill_file: ".agents/skills/qa-agent-team/SKILL.md"
+    invocation: "orchestrated"
+    standalone: false
+    dependencies:
+      skills: ["failure-triage", "knowledge-curation", "qa-ticket-intake", "requirements-readiness"]
+      standards: ["adversarial-verification"]
+  release-testing:
+    skill_file: ".agents/skills/release-testing/SKILL.md"
+    invocation: "orchestrated"
+    standalone: false
+    dependencies:
+      skills: ["failure-triage", "knowledge-curation", "qa-ticket-intake"]
+      standards: ["adversarial-verification"]
+
+agents:
+  orchestrator:
+    role_file: ".agents/roles/orchestrator.md"
+    default_tier: "high_reasoning"
+    skills:
+      - "qa-agent-team"
+      - "release-testing"
+    escalation_tier: null
+
+  requirements_analyst:
+    role_file: ".agents/roles/requirements-analyst.md"
+    default_tier: "standard"
+    skills:
+      - "requirements-readiness"
+    escalation_tier: "high_reasoning"
+
+  intake_analyst:
+    role_file: ".agents/roles/intake-analyst.md"
+    default_tier: "standard"
+    skills:
+      - "qa-ticket-intake"
+    escalation_tier: "high_reasoning"
+
+  architect:
+    role_file: ".agents/roles/architect.md"
+    default_tier: "high_reasoning"
+    skills: []
+    escalation_tier: null
+
+  implementer:
+    role_file: ".agents/roles/implementer.md"
+    default_tier: "standard"
+    skills: []
+    escalation_tier: "high_reasoning"
+
+  test_executor:
+    role_file: ".agents/roles/test-executor.md"
+    default_tier: "economy"
+    skills: []
+    escalation_tier: "standard"
+
+  adversarial_verifier:
+    role_file: ".agents/roles/adversarial-verifier.md"
+    default_tier: "high_reasoning"
+    skills: []
+    standards:
+      - "adversarial-verification"
+    escalation_tier: null
+
+  failure_triage_analyst:
+    role_file: ".agents/roles/failure-triage-analyst.md"
+    default_tier: "standard"
+    skills:
+      - "failure-triage"
+    escalation_tier: "high_reasoning"
+
+  accessibility_specialist:
+    role_file: ".agents/roles/accessibility-specialist.md"
+    default_tier: "standard"
+    skills: []
+    escalation_tier: "high_reasoning"
+
+  knowledge_curator:
+    role_file: ".agents/roles/knowledge-curator.md"
+    default_tier: "economy"
+    skills:
+      - "knowledge-curation"
+    escalation_tier: "standard"
+
+  release_parser:
+    role_file: ".agents/roles/release-parser.md"
+    default_tier: "standard"
+    skills: []
+    escalation_tier: "high_reasoning"
+
+escalation_rules:
+  - condition: "evidence_conflicts"
+    action: "escalate"
+
+  - condition: "confidence_low"
+    action: "escalate"
+
+  - condition: "requirements_ambiguous"
+    action: "escalate"
+
+  - condition: "cross_system_reasoning_required"
+    action: "escalate"
+
+  - condition: "failure_classification_uncertain"
+    action: "escalate"
+
+  - condition: "task_becomes_mechanical"
+    action: "deescalate"
+
+workflows:
+  qa:
+    definition_file: ".agents/workflows/qa.workflow.json"
+  automate:
+    definition_file: ".agents/workflows/automate.workflow.json"
+  release-testing:
+    definition_file: ".agents/workflows/release-testing.workflow.json"
+
+schemas:
+  agent_registry: ".agents/schemas/agent-registry.v1.schema.json"
+  artifact_types: ".agents/schemas/artifact-types.v1.schema.json"
+  workflow_definition: ".agents/schemas/workflow-definition.v1.schema.json"
+  artifact_handoff: ".agents/schemas/artifact-handoff.v1.schema.json"
+  routing_event: ".agents/schemas/routing-event.v1.schema.json"
+  human_gate: ".agents/schemas/human-gate.v1.schema.json"
+
+telemetry:
+  enabled: true
+  fields:
+    - event_id
+    - workflow_run_id
+    - task_id
+    - role_id
+    - requested_tier
+    - selected_tier
+    - task_type
+    - tokens_in
+    - tokens_out
+    - latency_ms
+    - attempt
+    - transition
+    - transition_reason
+    - verifier_result
+    - timestamp
