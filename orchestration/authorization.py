@@ -19,17 +19,18 @@ def _resource_hash(resource: str) -> str:
 
 @dataclass(frozen=True)
 class GateApproval:
+    workflow_run_id: str
+    gate_id: str
     gate_type: str
     capability: str
-    resource_hash: str
+    approved_resource_hashes: tuple[str, ...]
+    approved_evidence_hashes: tuple[str, ...]
+    approver: str
+    approved_at: str
     policy_version: str
     status: str = "approved"
     stale: bool = False
-
-    @classmethod
-    def for_resource(cls, gate_type: str, capability: str, resource: str, policy_version: str = "role-capability-policy/v1") -> "GateApproval":
-        return cls(gate_type, capability, _resource_hash(resource), policy_version)
-
+    trusted: bool = False
 
 @dataclass(frozen=True)
 class AuthorizationDecision:
@@ -127,8 +128,9 @@ class AuthorizationService:
             return self._emit(role_id, capability, resource, "DENY", "TASK_GRANT_REQUIRED")
         if capability in gated:
             gate_type = gated[capability]
-            matching = [approval for approval in gate_approvals if approval.gate_type == gate_type and approval.capability == capability and approval.resource_hash == _resource_hash(resource)]
-            valid = [approval for approval in matching if approval.status == "approved" and not approval.stale and approval.policy_version == self.policy_version]
+            run_id = context.get("workflow_run_id")
+            matching = [approval for approval in gate_approvals if approval.gate_type == gate_type and approval.capability == capability and _resource_hash(resource) in approval.approved_resource_hashes]
+            valid = [approval for approval in matching if approval.trusted and approval.status == "approved" and not approval.stale and approval.policy_version == self.policy_version and (run_id is None or approval.workflow_run_id == run_id)]
             if valid:
                 return self._emit(role_id, capability, resource, "ALLOW", "VALID_GATE_APPROVAL", gate_type)
             reason = "GATE_APPROVAL_STALE_OR_INVALID" if matching else "HUMAN_GATE_REQUIRED"

@@ -1,6 +1,7 @@
 schema_version: "agent-registry/v1"
 registry_id: "ai-quality-platform"
 artifact_types_file: ".agents/artifact-types.v1.json"
+artifact_contracts_file: ".agents/artifact-contracts.v1.json"
 capability_registry_file: ".agents/capabilities.v1.json"
 authorization_policy_version: "role-capability-policy/v1"
 
@@ -11,7 +12,17 @@ enums:
     - "SUPPORTED_WITH_CONCERNS"
     - "REFUTED"
     - "INSUFFICIENT_EVIDENCE"
-  gate_types: ["design_approval", "qa_signoff", "release_approval"]
+  gate_types: ["design_approval", "qa_signoff", "release_approval", "knowledge_publication_approval"]
+  command_categories: ["read_only", "test", "build", "write_local", "vcs_local", "network", "destructive"]
+
+providers:
+  openai:
+    adapter: "orchestration.providers.openai:OpenAIProvider"
+    api_key_env: "OPENAI_API_KEY"
+    model_env:
+      economy: "AQP_OPENAI_MODEL_ECONOMY"
+      standard: "AQP_OPENAI_MODEL_STANDARD"
+      high_reasoning: "AQP_OPENAI_MODEL_HIGH_REASONING"
 
 routing_policy:
   principle: "Use the least-expensive model tier that can reliably perform the task."
@@ -159,7 +170,7 @@ agents:
       allowed: ["repo.read", "repo.write", "repo.execute", "tests.run", "artifacts.read", "artifacts.write"]
       denied: ["external.write", "vcs.push", "vcs.pr_create", "vcs.merge", "deploy.execute", "destructive.execute"]
       gated: []
-      scope: {path_prefixes: ["."], read_only_directories: [".agents/"], writable_directories: ["@task.authorized_paths"], command_categories: ["build", "lint", "test", "approved_script"], external_system_categories: [], task_granted_capabilities: []}
+      scope: {path_prefixes: ["."], read_only_directories: [".agents/"], writable_directories: ["@task.authorized_paths"], command_categories: ["build", "test", "write_local"], external_system_categories: [], task_granted_capabilities: []}
 
   test_executor:
     role_file: ".agents/roles/test-executor.md"
@@ -170,7 +181,7 @@ agents:
       allowed: ["repo.read", "repo.execute", "tests.run", "artifacts.read", "artifacts.write"]
       denied: ["repo.write", "knowledge.write_working", "wiki.write", "external.write", "vcs.commit", "vcs.push", "vcs.merge", "deploy.execute", "destructive.execute"]
       gated: []
-      scope: {path_prefixes: ["."], read_only_directories: ["."], writable_directories: [], command_categories: ["test", "approved_script"], external_system_categories: [], task_granted_capabilities: []}
+      scope: {path_prefixes: ["."], read_only_directories: ["."], writable_directories: [], command_categories: ["test"], external_system_categories: [], task_granted_capabilities: []}
 
   adversarial_verifier:
     role_file: ".agents/roles/adversarial-verifier.md"
@@ -206,7 +217,7 @@ agents:
       allowed: ["repo.read", "tests.run", "artifacts.read", "artifacts.write"]
       denied: ["repo.write", "external.write", "vcs.commit", "vcs.push", "vcs.merge", "deploy.execute", "destructive.execute"]
       gated: []
-      scope: {path_prefixes: ["."], read_only_directories: ["."], writable_directories: [], command_categories: ["test", "accessibility_test"], external_system_categories: [], task_granted_capabilities: []}
+      scope: {path_prefixes: ["."], read_only_directories: ["."], writable_directories: [], command_categories: ["test"], external_system_categories: [], task_granted_capabilities: []}
 
   knowledge_curator:
     role_file: ".agents/roles/knowledge-curator.md"
@@ -218,7 +229,7 @@ agents:
       allowed: ["knowledge.read", "knowledge.write_working", "wiki.read", "wiki.propose_write", "artifacts.read", "artifacts.write"]
       denied: ["repo.write", "repo.execute", "external.write", "vcs.commit", "vcs.push", "vcs.merge", "deploy.execute", "destructive.execute"]
       gated:
-        - {capability: "wiki.write", gate_type: "release_approval"}
+        - {capability: "wiki.write", gate_type: "knowledge_publication_approval"}
       scope: {path_prefixes: ["knowledge/"], read_only_directories: ["knowledge/"], writable_directories: ["knowledge/mempalace/"], command_categories: [], external_system_categories: ["github_wiki"], task_granted_capabilities: []}
 
   release_parser:
@@ -262,6 +273,7 @@ workflows:
 schemas:
   agent_registry: ".agents/schemas/agent-registry.v1.schema.json"
   artifact_types: ".agents/schemas/artifact-types.v1.schema.json"
+  artifact_contracts: ".agents/schemas/artifact-contracts.v1.schema.json"
   capability_registry: ".agents/schemas/capability-registry.v1.schema.json"
   role_capability_policy: ".agents/schemas/role-capability-policy.v1.schema.json"
   authorization_event: ".agents/schemas/authorization-event.v1.schema.json"
@@ -282,6 +294,10 @@ telemetry:
     - task_type
     - tokens_in
     - tokens_out
+    - cached_tokens
+    - provider
+    - model_identifier
+    - estimated_cost
     - latency_ms
     - attempt
     - transition

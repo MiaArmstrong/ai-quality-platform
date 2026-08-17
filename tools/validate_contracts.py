@@ -19,6 +19,9 @@ EXPECTED_VERDICTS = [
     "REFUTED",
     "INSUFFICIENT_EVIDENCE",
 ]
+EXPECTED_COMMAND_CATEGORIES = [
+    "read_only", "test", "build", "write_local", "vcs_local", "network", "destructive",
+]
 
 
 class ContractError(ValueError):
@@ -116,6 +119,7 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
     tiers = set(registry.get("enums", {}).get("tiers", []))
     verdicts = registry.get("enums", {}).get("verifier_verdicts", [])
     gate_types = set(registry.get("enums", {}).get("gate_types", []))
+    command_categories = registry.get("enums", {}).get("command_categories", [])
     roles = registry.get("agents", {})
     skills = registry.get("skills", {})
     standards = registry.get("standards", {})
@@ -148,6 +152,23 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
 
     if verdicts != EXPECTED_VERDICTS:
         errors.append(f"registry: verifier verdict enum must equal {EXPECTED_VERDICTS}")
+    if command_categories != EXPECTED_COMMAND_CATEGORIES:
+        errors.append(f"registry: command category enum must equal {EXPECTED_COMMAND_CATEGORIES}")
+
+    artifact_contracts_file = registry.get("artifact_contracts_file", "")
+    _check_file(root, artifact_contracts_file, "artifact contracts", errors)
+    if (root / artifact_contracts_file).is_file():
+        contract_document = load_json(root / artifact_contracts_file)
+        contract_schema_path = root / ".agents/schemas/artifact-contracts.v1.schema.json"
+        if contract_schema_path.is_file():
+            errors.extend(_schema_errors(contract_document, load_json(contract_schema_path), "artifact contracts"))
+        for artifact_type, contract in contract_document.get("contracts", {}).items():
+            if artifact_type not in artifact_types:
+                errors.append(f"artifact contracts: unknown artifact type: {artifact_type}")
+            try:
+                Draft202012Validator.check_schema(contract)
+            except Exception as exc:
+                errors.append(f"artifact contract {artifact_type}: invalid JSON Schema: {exc}")
 
     for standard_id, definition in standards.items():
         _check_file(root, definition.get("standard_file", ""), f"standard {standard_id}", errors)
@@ -218,6 +239,9 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
         for capability in scope.get("task_granted_capabilities", []):
             if capability not in allowed:
                 errors.append(f"role {role_id}: task-granted capability must also be allowed: {capability}")
+        for category in scope.get("command_categories", []):
+            if category not in command_categories:
+                errors.append(f"role {role_id}: unknown command category: {category}")
 
     required_gate_capable = {"wiki.write", "external.write", "vcs.push", "vcs.pr_create", "vcs.merge", "deploy.execute", "destructive.execute"}
     for capability in sorted(required_gate_capable):
@@ -277,6 +301,9 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
                     granted = set(policy.get("allowed", [])) | {item.get("capability") for item in policy.get("gated", [])}
                     if capability not in granted:
                         errors.append(f"workflow {workflow_id}: node {node.get('id')} declares capability not granted to role: {capability}")
+                category = action.get("command_category")
+                if category is not None and category not in command_categories:
+                    errors.append(f"workflow {workflow_id}: node {node.get('id')} references unknown command category {category}")
         for required_gate in workflow.get("required_gates", []):
             if required_gate not in present_gates:
                 errors.append(f"workflow {workflow_id}: required gate is missing: {required_gate}")

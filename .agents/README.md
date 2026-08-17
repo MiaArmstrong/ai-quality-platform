@@ -20,6 +20,11 @@ Role Markdown files define behavior.
 
 The registry defines how the orchestration layer discovers and routes those roles.
 
+Provider configuration maps logical tiers to environment-variable names; model
+identifiers do not belong in role or workflow contracts. Versioned artifact
+contracts govern structured model output. Knowledge publication uses its own
+`knowledge_publication_approval` gate rather than release approval.
+
 Do not duplicate detailed role instructions in the registry.
 
 ## Contract validation

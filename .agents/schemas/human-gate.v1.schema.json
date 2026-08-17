@@ -1,10 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "human-gate/v1", "type": "object",
-  "required": ["schema_version", "gate_id", "workflow_run_id", "node_id", "gate_type", "status", "evidence", "requested_at"],
+  "required": ["schema_version", "gate_id", "workflow_run_id", "node_id", "gate_type", "status", "evidence", "requested_at", "policy_version", "approved_resource_hashes"],
   "properties": {
     "schema_version": {"const": "human-gate/v1"}, "gate_id": {"type": "string"}, "workflow_run_id": {"type": "string"}, "node_id": {"type": "string"}, "gate_type": {"type": "string"},
     "status": {"enum": ["pending", "approved", "rejected", "stale"]},
     "evidence": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "required": ["artifact_id", "content_hash"], "properties": {"artifact_id": {"type": "string"}, "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}, "additionalProperties": false}},
-    "requested_at": {"type": "string", "format": "date-time"}, "decided_at": {"type": ["string", "null"], "format": "date-time"}, "decided_by": {"type": ["string", "null"]}, "decision_reason": {"type": ["string", "null"]}
+    "requested_at": {"type": "string", "format": "date-time"}, "decided_at": {"type": ["string", "null"], "format": "date-time"}, "decided_by": {"type": ["string", "null"]}, "decision_reason": {"type": ["string", "null"]},
+    "policy_version": {"type": "string", "minLength": 1},
+    "approved_resource_hashes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
   }, "additionalProperties": false
 }

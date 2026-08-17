@@ -1,10 +1,49 @@
 # Executable Orchestration Vertical Slice
 
-This package compiles and executes the provider-neutral `automate` workflow
-against a deterministic mock role executor.
+This package compiles and executes the provider-neutral `automate` workflow.
+The deterministic mock remains the offline default; selected read-only roles
+can be routed through a provider adapter.
 
-It intentionally does not contain model SDKs, external integrations, real test
-execution, Wiki writes, ticket writes, or deployment behavior.
+It intentionally does not contain action adapters, real shell/test execution,
+filesystem mutation, Wiki writes, ticket writes, or deployment behavior.
+
+## Provider adapter
+
+`ExecutionRequest` and `ExecutionResult` are vendor-neutral. The context compiler
+loads only the selected role, declared skills and standards, supplied artifacts,
+workflow/authorization context, and output contract. It records SHA-256 hashes
+for every contributing instruction file.
+
+The OpenAI adapter uses the Responses API with strict JSON Schema output per the
+official [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs).
+The runtime validates output again, preserves malformed originals and errors,
+and permits one explicit repair attempt. An `escalate` result creates a new
+attempt only through a registry-approved tier transition.
+
+Model access grants no tool or action authority. The adapter exposes no tools;
+declared actions are independently checked by `AuthorizationService`. This is
+an application-level control, not an OS sandbox.
+
+Install the optional dependency with `pip install -r requirements-provider.txt`.
+Configure logical tiers without putting model IDs in roles or workflows:
+
+```text
+OPENAI_API_KEY=<secret>
+AQP_OPENAI_MODEL_ECONOMY=<model-id>
+AQP_OPENAI_MODEL_STANDARD=<model-id>
+AQP_OPENAI_MODEL_HIGH_REASONING=<model-id>
+```
+
+Telemetry records provider, model, latency, attempt, input/output tokens, cached
+tokens when available, and cost only when pricing is explicitly configured.
+
+The optional smoke test is disabled by default and runs one harmless, read-only
+Architect task with no tools or outward actions:
+
+```text
+$env:AQP_RUN_OPENAI_SMOKE='1'
+python tools/smoke_openai_provider.py
+```
 
 ## Commands
 

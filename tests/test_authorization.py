@@ -6,7 +6,7 @@ from pathlib import Path
 
 from orchestration.authorization import AuthorizationService, GateApproval
 from orchestration.compiler import compile_system
-from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
+from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore, gate_approval_from_persisted_decision
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,9 +51,9 @@ class AuthorizationTests(unittest.TestCase):
         proposal = self.decide("knowledge_curator", "wiki.propose_write", "github_wiki:Architecture", {"external_system_category": "github_wiki"})
         publish = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki"})
         self.assertEqual("ALLOW", proposal.decision)
-        self.assertEqual(("REQUIRE_GATE", "release_approval"), (publish.decision, publish.applicable_gate))
-        approval = GateApproval.for_resource("release_approval", "wiki.write", "github_wiki:Architecture")
-        approved = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki"}, [approval])
+        self.assertEqual(("REQUIRE_GATE", "knowledge_publication_approval"), (publish.decision, publish.applicable_gate))
+        approval = gate_approval_from_persisted_decision(workflow_run_id="run-1", gate_id="gate-1", gate_type="knowledge_publication_approval", capability="wiki.write", resources=["github_wiki:Architecture"], evidence_hashes=["a" * 64], approver="human", approved_at="2026-01-01T00:00:00+00:00", policy_version="role-capability-policy/v1")
+        approved = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki", "workflow_run_id": "run-1"}, [approval])
         self.assertEqual("ALLOW", approved.decision)
 
     def test_merge_deploy_and_destructive_actions_require_gate(self):
@@ -62,10 +62,15 @@ class AuthorizationTests(unittest.TestCase):
                 self.assertEqual("REQUIRE_GATE", self.decide("orchestrator", capability, resource).decision)
 
     def test_stale_gate_approval_does_not_authorize(self):
-        approval = GateApproval.for_resource("release_approval", "vcs.merge", "main")
-        stale = GateApproval(approval.gate_type, approval.capability, approval.resource_hash, approval.policy_version, stale=True)
+        approval = gate_approval_from_persisted_decision(workflow_run_id="run-1", gate_id="gate-1", gate_type="release_approval", capability="vcs.merge", resources=["main"], evidence_hashes=["a" * 64], approver="human", approved_at="2026-01-01T00:00:00+00:00", policy_version="role-capability-policy/v1")
+        stale = GateApproval(**(approval.__dict__ | {"stale": True}))
         result = self.decide("orchestrator", "vcs.merge", "main", approvals=[stale])
         self.assertEqual(("REQUIRE_GATE", "GATE_APPROVAL_STALE_OR_INVALID"), (result.decision, result.reason_code))
+
+    def test_untrusted_approval_record_cannot_authorize(self):
+        approval = GateApproval("run-1", "gate-1", "knowledge_publication_approval", "wiki.write", ("x",), ("y",), "human", "now", "role-capability-policy/v1")
+        result = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki"}, [approval])
+        self.assertEqual("REQUIRE_GATE", result.decision)
 
     def test_failure_triage_test_execution_requires_task_grant(self):
         denied = self.decide("failure_triage_analyst", "tests.run", "tests", {"command_category": "test"})

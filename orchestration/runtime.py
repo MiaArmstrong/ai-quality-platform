@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .compiler import CompiledSystem
-from .authorization import AuthorizationService, GateApproval
+from .authorization import AuthorizationService, GateApproval, _resource_hash
 
 
 RUNTIME_STATES = {
@@ -38,6 +38,13 @@ def utcnow() -> str:
 
 def content_hash(content: Any) -> str:
     return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def gate_approval_from_persisted_decision(*, workflow_run_id: str, gate_id: str, gate_type: str, capability: str, resources: list[str], evidence_hashes: list[str], approver: str, approved_at: str, policy_version: str, stale: bool = False) -> GateApproval:
+    """Runtime-owned factory for approvals derived from persisted human decisions."""
+    if not workflow_run_id or not gate_id or not approver or not approved_at or not resources or not evidence_hashes:
+        raise ValueError("trusted gate approval requires persisted decision and resource/evidence bindings")
+    return GateApproval(workflow_run_id, gate_id, gate_type, capability, tuple(_resource_hash(item) for item in resources), tuple(evidence_hashes), approver, approved_at, policy_version, stale=stale, trusted=True)
 
 
 class RoleExecutor(Protocol):
@@ -89,9 +96,15 @@ class SQLiteEventStore:
         CREATE TABLE IF NOT EXISTS artifacts(artifact_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, artifact_type TEXT NOT NULL, producer_node TEXT NOT NULL, content_json TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS task_attempts(run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, role_id TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL, outcome TEXT, started_at TEXT NOT NULL, finished_at TEXT, PRIMARY KEY(run_id,node_id,attempt));
         CREATE TABLE IF NOT EXISTS routing_events(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, workflow_id TEXT NOT NULL, task_id TEXT NOT NULL, role_id TEXT NOT NULL, requested_tier TEXT NOT NULL, selected_tier TEXT NOT NULL, reason_code TEXT NOT NULL, transition TEXT NOT NULL, attempt INTEGER NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS gates(gate_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL, gate_type TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL, requested_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT, reason TEXT);
+        CREATE TABLE IF NOT EXISTS gates(gate_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL, gate_type TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL, requested_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT, reason TEXT, policy_version TEXT, approved_resource_hashes_json TEXT);
+        CREATE TABLE IF NOT EXISTS provider_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, latency_ms INTEGER NOT NULL, estimated_cost REAL, response_id TEXT, raw_output TEXT, validation_errors_json TEXT NOT NULL, source_hashes_json TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS findings(finding_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
         """)
+        gate_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(gates)")}
+        if "policy_version" not in gate_columns:
+            self.connection.execute("ALTER TABLE gates ADD COLUMN policy_version TEXT")
+        if "approved_resource_hashes_json" not in gate_columns:
+            self.connection.execute("ALTER TABLE gates ADD COLUMN approved_resource_hashes_json TEXT")
         self.connection.commit()
 
     def event(self, run_id: str, event_type: str, node_id: str | None = None, task_id: str | None = None, **payload: Any) -> None:
@@ -115,7 +128,7 @@ class OrchestrationEngine:
         self.workflow = compiled.workflows["automate"]
         self.nodes = {node["id"]: node for node in self.workflow["nodes"]}
         self.authorization = AuthorizationService(compiled.registry, compiled.capabilities)
-        if isinstance(executor, MockRoleExecutor):
+        if hasattr(executor, "authorization"):
             executor.authorization = self.authorization
 
     def _set_state(self, run_id: str, state: str) -> None:
@@ -182,14 +195,35 @@ class OrchestrationEngine:
     def _execute_task(self, run_id: str, node: dict[str, Any]) -> None:
         attempt=self.store.connection.execute("SELECT COALESCE(MAX(attempt),0)+1 FROM task_attempts WHERE run_id=? AND node_id=?",(run_id,node["id"])).fetchone()[0]
         tier=self._route(run_id,node,attempt); self._set_state(run_id,"VERIFYING" if node["id"] in {"design_critique","verify"} else "RUNNING")
+        repair_used = False
+        repair_context = None
         while True:
             started=utcnow(); self.store.connection.execute("INSERT INTO task_attempts VALUES(?,?,?,?,?,?,?,?,?)",(run_id,node["id"],attempt,node["role_id"],tier,"RUNNING",None,started,None))
             audit_start=len(self.authorization.audit_log)
-            result=self.executor.execute(role_id=node["role_id"],task_id=node["id"],tier=tier,inputs=self._inputs(run_id,node["requires"]),produces=node["produces"],attempt=attempt,actions=node.get("actions",[]),task_context={},gate_approvals=[])
+            context={"workflow_context": {"workflow_id": "automate", "workflow_run_id": run_id, "node_id": node["id"]}}
+            if repair_context: context["repair_context"] = repair_context
+            result=self.executor.execute(role_id=node["role_id"],task_id=node["id"],tier=tier,inputs=self._inputs(run_id,node["requires"]),produces=node["produces"],attempt=attempt,actions=node.get("actions",[]),task_context=context,gate_approvals=[])
             for decision in self.authorization.audit_log[audit_start:]:
                 self.store.event(run_id,"authorization_decision",node["id"],node["id"],**decision.as_dict())
             outcome=result["outcome"]
+            if "telemetry" in result:
+                telemetry=result["telemetry"]
+                self.store.connection.execute("INSERT INTO provider_attempts(run_id,node_id,attempt,provider,model,input_tokens,output_tokens,cached_tokens,latency_ms,estimated_cost,response_id,raw_output,validation_errors_json,source_hashes_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run_id,node["id"],attempt,telemetry["provider"],telemetry["model"],telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("cached_tokens"),telemetry["latency_ms"],telemetry.get("estimated_cost"),result.get("provider_response_id"),result.get("raw_output"),json.dumps(result.get("validation_errors",[])),json.dumps(result.get("source_hashes",{}),sort_keys=True),utcnow()))
+                self.store.event(run_id,"provider_attempt_recorded",node["id"],node["id"],attempt=attempt,provider=telemetry["provider"],model=telemetry["model"],latency_ms=telemetry["latency_ms"],input_tokens=telemetry.get("input_tokens"),output_tokens=telemetry.get("output_tokens"),cached_tokens=telemetry.get("cached_tokens"),validation_errors=result.get("validation_errors",[]),source_hashes=result.get("source_hashes",{}))
+            if outcome=="failure" and result.get("reason_code") in {"malformed_json","schema_validation_failed","provider_no_output"}:
+                self.store.connection.execute("UPDATE task_attempts SET status='INVALID_OUTPUT',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(result["reason_code"],utcnow(),run_id,node["id"],attempt))
+                if not repair_used:
+                    repair_used=True
+                    repair_context={"original_output": result.get("raw_output"), "validation_errors": result.get("validation_errors", []), "original_output_hash": content_hash(result.get("raw_output"))}
+                    attempt+=1
+                    self.store.event(run_id,"provider_repair_requested",node["id"],node["id"],attempt=attempt,original_output_hash=repair_context["original_output_hash"])
+                    continue
+                self._set_state(run_id,"FAILED")
+                self.store.event(run_id,"task_failed",node["id"],node["id"],reason_code=result["reason_code"])
+                return
             if outcome=="escalate":
+                for artifact_type,content in result.get("artifacts", {}).items():
+                    self._artifact(run_id,artifact_type,node["id"],content)
                 self.store.connection.execute("UPDATE task_attempts SET status='ESCALATED',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(outcome,utcnow(),run_id,node["id"],attempt))
                 target=self.compiled.registry["agents"][node["role_id"]].get("escalation_tier")
                 if not target: raise ValueError(f"role {node['role_id']} cannot escalate")
@@ -208,7 +242,7 @@ class OrchestrationEngine:
                 if not row: raise ValueError(f"gate missing evidence {artifact_type}")
                 evidence[artifact_type]={"artifact_id":row["artifact_id"],"content_hash":row["content_hash"]}
             gate_id=str(uuid.uuid4())
-            self.store.connection.execute("INSERT INTO gates VALUES(?,?,?,?,?,?,?,?,?,?)",(gate_id,run_id,node["id"],node["gate_type"],"pending",json.dumps(evidence,sort_keys=True),utcnow(),None,None,None))
+            self.store.connection.execute("INSERT INTO gates VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(gate_id,run_id,node["id"],node["gate_type"],"pending",json.dumps(evidence,sort_keys=True),utcnow(),None,None,None,self.authorization.policy_version,json.dumps([])))
             self.store.event(run_id,"gate_requested",node["id"],gate_id=gate_id,gate_type=node["gate_type"],evidence=evidence)
         self._set_state(run_id,"AWAITING_HUMAN")
 
@@ -218,7 +252,7 @@ class OrchestrationEngine:
         if node["type"]!="gate" or run["state"]!="AWAITING_HUMAN": raise ValueError("run is not awaiting a gate decision")
         gate=self.store.connection.execute("SELECT * FROM gates WHERE run_id=? AND node_id=? AND status='pending' ORDER BY requested_at DESC LIMIT 1",(run_id,node["id"])).fetchone()
         if not gate: raise ValueError("no pending gate")
-        self.store.connection.execute("UPDATE gates SET status=?,decided_at=?,decided_by=?,reason=? WHERE gate_id=?",(decision,utcnow(),decided_by,reason,gate["gate_id"]))
+        self.store.connection.execute("UPDATE gates SET status=?,decided_at=?,decided_by=?,reason=?,policy_version=? WHERE gate_id=?",(decision,utcnow(),decided_by,reason,self.authorization.policy_version,gate["gate_id"]))
         evidence=json.loads(gate["evidence_json"]); self._artifact(run_id,"human_gate_evidence",node["id"],{"gate_id":gate["gate_id"],"decision":decision,"evidence":evidence,"decided_by":decided_by,"reason":reason})
         self.store.event(run_id,"gate_decided",node["id"],gate_id=gate["gate_id"],decision=decision,reason=reason,decided_by=decided_by)
         self._move(run_id,node["id"],decision)
@@ -243,4 +277,4 @@ class OrchestrationEngine:
 
     def inspect(self, run_id: str) -> dict[str, Any]:
         run=self.store.run(run_id)
-        return {"run":run,"events":self.store.events(run_id),"artifacts":[dict(r) for r in self.store.connection.execute("SELECT artifact_id,artifact_type,producer_node,content_hash,active,created_at FROM artifacts WHERE run_id=? ORDER BY created_at",(run_id,))],"gates":[dict(r) for r in self.store.connection.execute("SELECT * FROM gates WHERE run_id=? ORDER BY requested_at",(run_id,))],"routing":[dict(r) for r in self.store.connection.execute("SELECT * FROM routing_events WHERE run_id=? ORDER BY id",(run_id,))]}
+        return {"run":run,"events":self.store.events(run_id),"artifacts":[dict(r) for r in self.store.connection.execute("SELECT artifact_id,artifact_type,producer_node,content_hash,active,created_at FROM artifacts WHERE run_id=? ORDER BY created_at",(run_id,))],"gates":[dict(r) for r in self.store.connection.execute("SELECT * FROM gates WHERE run_id=? ORDER BY requested_at",(run_id,))],"routing":[dict(r) for r in self.store.connection.execute("SELECT * FROM routing_events WHERE run_id=? ORDER BY id",(run_id,))],"provider_attempts":[dict(r) for r in self.store.connection.execute("SELECT * FROM provider_attempts WHERE run_id=? ORDER BY id",(run_id,))]}

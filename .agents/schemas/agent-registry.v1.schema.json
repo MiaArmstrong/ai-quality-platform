@@ -2,22 +2,35 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "agent-registry/v1",
   "type": "object",
-  "required": ["schema_version", "registry_id", "artifact_types_file", "capability_registry_file", "authorization_policy_version", "enums", "routing_policy", "standards", "skills", "agents", "escalation_rules", "workflows", "schemas", "telemetry"],
+  "required": ["schema_version", "registry_id", "artifact_types_file", "artifact_contracts_file", "capability_registry_file", "authorization_policy_version", "enums", "providers", "routing_policy", "standards", "skills", "agents", "escalation_rules", "workflows", "schemas", "telemetry"],
   "properties": {
     "schema_version": {"const": "agent-registry/v1"},
     "registry_id": {"$ref": "#/$defs/id"},
     "artifact_types_file": {"type": "string"},
+    "artifact_contracts_file": {"type": "string"},
     "capability_registry_file": {"type": "string"},
     "authorization_policy_version": {"const": "role-capability-policy/v1"},
     "enums": {
       "type": "object",
-      "required": ["tiers", "verifier_verdicts", "gate_types"],
+      "required": ["tiers", "verifier_verdicts", "gate_types", "command_categories"],
       "properties": {
         "tiers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
         "verifier_verdicts": {"const": ["SUPPORTED", "SUPPORTED_WITH_CONCERNS", "REFUTED", "INSUFFICIENT_EVIDENCE"]},
-        "gate_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+        "gate_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "command_categories": {"const": ["read_only", "test", "build", "write_local", "vcs_local", "network", "destructive"]}
       },
       "additionalProperties": false
+    },
+    "providers": {
+      "type": "object", "minProperties": 1,
+      "additionalProperties": {
+        "type": "object", "required": ["adapter", "api_key_env", "model_env"],
+        "properties": {
+          "adapter": {"type": "string", "minLength": 1},
+          "api_key_env": {"type": "string", "minLength": 1},
+          "model_env": {"type": "object", "required": ["economy", "standard", "high_reasoning"], "additionalProperties": {"type": "string", "minLength": 1}}
+        }, "additionalProperties": false
+      }
     },
     "routing_policy": {
       "type": "object",
