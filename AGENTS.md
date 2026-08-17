@@ -230,6 +230,17 @@ Never commit API keys, access tokens, passwords, private certificates, customer 
 
 Use synthetic data in examples.
 
+### Capability authorization
+
+Agent role instructions are behavioral guidance, not an authorization boundary.
+Machine-enforced role policies in `.agents/agent-registry.yaml` and stable IDs in
+`.agents/capabilities.v1.json` govern executable capabilities.
+
+Future action adapters must request an authorization decision for the exact role,
+capability, resource, and task scope immediately before acting. `REQUIRE_GATE`
+does not authorize execution; only a valid, current approval can convert a gated
+request to `ALLOW`.
+
 ## 17. Scope boundaries
 
 Read the nearest `AGENTS.md` before modifying files.

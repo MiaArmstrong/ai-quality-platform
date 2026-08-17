@@ -31,3 +31,23 @@ python tools/demo_automate.py --db demo.db
 
 The demonstration rejects and reworks both the design and release gates before
 reaching `COMPLETED`.
+
+## Authorization decisions
+
+`authorization.py` evaluates role, capability, resource, task scope, and current
+gate approvals. It returns `ALLOW`, `DENY`, or `REQUIRE_GATE` without performing
+the requested action. The mock executor checks every action declared by a
+workflow task, and the workflow event ledger records each decision.
+
+Repository writes can be limited to task-authorized path prefixes; command
+execution is limited by command category; and Wiki/external operations can be
+limited by external-system category. Stale approvals and approvals for another
+resource, capability, or policy version do not authorize an action.
+
+Prompt instructions are not sufficient security boundaries because a model can
+misinterpret or disregard prose. Future real adapters must enforce these machine
+decisions immediately before acting.
+
+```text
+python tools/demo_authorization.py
+```

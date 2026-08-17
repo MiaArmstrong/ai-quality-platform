@@ -40,3 +40,17 @@ verdict, and human-gate references. It does not execute workflows.
 `orchestration/` contains the approved provider-neutral, mock-backed executable
 slice for the `automate` workflow. See `orchestration/README.md` for commands and
 scope boundaries. The `qa` and `release-testing` workflows remain declarative.
+
+## Capability authorization
+
+`.agents/capabilities.v1.json` is the central registry of stable, provider-neutral
+capability IDs. Every role has a machine-readable `capability_policy` in
+`agent-registry.yaml` declaring allowed, denied, gated, and scoped behavior.
+
+Policies are default-deny. Gated capabilities require a matching, current human
+approval for the exact capability and resource. Task-scoped write permissions do
+not expand beyond paths explicitly supplied by the active task.
+
+Role prompts remain useful behavioral guidance, but prompt text is not a security
+boundary. Any future real tool adapter must call the authorization service and
+refuse actions unless it returns `ALLOW`.

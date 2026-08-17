@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .compiler import CompiledSystem
+from .authorization import AuthorizationService, GateApproval
 
 
 RUNTIME_STATES = {
@@ -40,20 +41,28 @@ def content_hash(content: Any) -> str:
 
 
 class RoleExecutor(Protocol):
-    def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, authorization_policy: dict[str, Any]) -> dict[str, Any]: ...
+    def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, actions: list[dict[str, Any]], task_context: dict[str, Any], gate_approvals: list[GateApproval]) -> dict[str, Any]: ...
 
 
 class MockRoleExecutor:
     """Deterministic, provider-neutral executor with no external capabilities."""
 
-    def __init__(self, outcomes: dict[str, list[str]] | None = None):
+    def __init__(self, outcomes: dict[str, list[str]] | None = None, authorization: AuthorizationService | None = None):
         self.outcomes = {key: list(value) for key, value in (outcomes or {}).items()}
         self.calls: list[tuple[str, int]] = []
+        self.authorization = authorization
 
-    def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, authorization_policy: dict[str, Any]) -> dict[str, Any]:
-        denied = set(authorization_policy.get("denied_capabilities", []))
-        if not {"network", "external_write", "destructive_action"}.issubset(denied):
-            raise PermissionError("mock executor requires outward-action capabilities to be denied")
+    def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, actions: list[dict[str, Any]], task_context: dict[str, Any], gate_approvals: list[GateApproval]) -> dict[str, Any]:
+        if self.authorization is None:
+            raise RuntimeError("mock executor requires an authorization service")
+        for action in actions:
+            context = dict(task_context)
+            for key in ("command_category", "external_system_category"):
+                if key in action:
+                    context[key] = action[key]
+            decision = self.authorization.decide(role_id=role_id, capability=action["capability"], resource=action["resource"], task_context=context, gate_approvals=gate_approvals)
+            if decision.decision != "ALLOW":
+                raise PermissionError(f"authorization {decision.decision}: {decision.reason_code}")
         self.calls.append((task_id, attempt))
         outcome = self.outcomes.get(task_id, ["success"]).pop(0) if self.outcomes.get(task_id) else "success"
         if outcome == "escalate":
@@ -105,6 +114,9 @@ class OrchestrationEngine:
         self.compiled, self.store, self.executor = compiled, store, executor
         self.workflow = compiled.workflows["automate"]
         self.nodes = {node["id"]: node for node in self.workflow["nodes"]}
+        self.authorization = AuthorizationService(compiled.registry, compiled.capabilities)
+        if isinstance(executor, MockRoleExecutor):
+            executor.authorization = self.authorization
 
     def _set_state(self, run_id: str, state: str) -> None:
         run = self.store.run(run_id)
@@ -172,7 +184,10 @@ class OrchestrationEngine:
         tier=self._route(run_id,node,attempt); self._set_state(run_id,"VERIFYING" if node["id"] in {"design_critique","verify"} else "RUNNING")
         while True:
             started=utcnow(); self.store.connection.execute("INSERT INTO task_attempts VALUES(?,?,?,?,?,?,?,?,?)",(run_id,node["id"],attempt,node["role_id"],tier,"RUNNING",None,started,None))
-            result=self.executor.execute(role_id=node["role_id"],task_id=node["id"],tier=tier,inputs=self._inputs(run_id,node["requires"]),produces=node["produces"],attempt=attempt,authorization_policy=self.compiled.registry["authorization_policies"][self.compiled.registry["default_authorization_policy"]])
+            audit_start=len(self.authorization.audit_log)
+            result=self.executor.execute(role_id=node["role_id"],task_id=node["id"],tier=tier,inputs=self._inputs(run_id,node["requires"]),produces=node["produces"],attempt=attempt,actions=node.get("actions",[]),task_context={},gate_approvals=[])
+            for decision in self.authorization.audit_log[audit_start:]:
+                self.store.event(run_id,"authorization_decision",node["id"],node["id"],**decision.as_dict())
             outcome=result["outcome"]
             if outcome=="escalate":
                 self.store.connection.execute("UPDATE task_attempts SET status='ESCALATED',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(outcome,utcnow(),run_id,node["id"],attempt))

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "authorization-event/v1",
+  "type": "object",
+  "required": ["schema_version", "decision_id", "decision", "role_id", "capability", "resource", "reason_code", "policy_version", "timestamp"],
+  "properties": {
+    "schema_version": {"const": "authorization-event/v1"},
+    "decision_id": {"type": "string"},
+    "decision": {"enum": ["ALLOW", "DENY", "REQUIRE_GATE"]},
+    "role_id": {"type": "string"}, "capability": {"type": "string"}, "resource": {"type": "string"},
+    "reason_code": {"type": "string"}, "applicable_gate": {"type": ["string", "null"]},
+    "policy_version": {"const": "role-capability-policy/v1"}, "timestamp": {"type": "string", "format": "date-time"}
+  }, "additionalProperties": false
+}

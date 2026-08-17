@@ -131,9 +131,20 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
         if len(values) != len(set(values)):
             errors.append("artifact types: duplicate IDs")
         artifact_types = set(values)
-    default_policy = registry.get("default_authorization_policy")
-    if default_policy not in registry.get("authorization_policies", {}):
-        errors.append(f"registry: unknown default authorization policy: {default_policy}")
+    capabilities_file = registry.get("capability_registry_file", "")
+    _check_file(root, capabilities_file, "capability registry", errors)
+    capabilities: dict[str, dict[str, Any]] = {}
+    if (root / capabilities_file).is_file():
+        capability_document = load_json(root / capabilities_file)
+        capability_schema_path = root / ".agents/schemas/capability-registry.v1.schema.json"
+        if capability_schema_path.is_file():
+            errors.extend(_schema_errors(capability_document, load_json(capability_schema_path), "capability registry"))
+        capability_ids = [item.get("id") for item in capability_document.get("capabilities", [])]
+        if len(capability_ids) != len(set(capability_ids)):
+            errors.append("capability registry: duplicate IDs")
+        capabilities = {item["id"]: item for item in capability_document.get("capabilities", []) if "id" in item}
+    policy_schema_path = root / ".agents/schemas/role-capability-policy.v1.schema.json"
+    policy_schema = load_json(policy_schema_path) if policy_schema_path.is_file() else None
 
     if verdicts != EXPECTED_VERDICTS:
         errors.append(f"registry: verifier verdict enum must equal {EXPECTED_VERDICTS}")
@@ -178,6 +189,40 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
         for standard_id in definition.get("standards", []):
             if standard_id not in standards:
                 errors.append(f"role {role_id}: unknown standard: {standard_id}")
+        policy = definition.get("capability_policy", {})
+        if policy_schema:
+            errors.extend(_schema_errors(policy, policy_schema, f"role {role_id} capability policy"))
+        allowed, denied = set(policy.get("allowed", [])), set(policy.get("denied", []))
+        gated = {item.get("capability"): item.get("gate_type") for item in policy.get("gated", [])}
+        gated_ids = [item.get("capability") for item in policy.get("gated", [])]
+        if len(gated_ids) != len(set(gated_ids)):
+            errors.append(f"role {role_id}: duplicate gated capability IDs")
+        for capability in allowed | denied | set(gated):
+            if capability not in capabilities:
+                errors.append(f"role {role_id}: unknown capability: {capability}")
+        conflicts = (allowed & denied) | (allowed & set(gated)) | (denied & set(gated))
+        if conflicts:
+            errors.append(f"role {role_id}: conflicting capability policies: {sorted(conflicts)}")
+        for capability, gate_type in gated.items():
+            if gate_type not in gate_types:
+                errors.append(f"role {role_id}: gated capability {capability} references unknown gate type {gate_type}")
+            if capability in capabilities and not capabilities[capability].get("gate_capable", False):
+                errors.append(f"role {role_id}: capability is not gate-capable: {capability}")
+        scope = policy.get("scope", {})
+        for field in ("path_prefixes", "read_only_directories", "writable_directories"):
+            for value in scope.get(field, []):
+                if value.startswith(("/", "\\")) or ".." in value.replace("\\", "/").split("/"):
+                    errors.append(f"role {role_id}: malformed {field} scope: {value}")
+                if value.startswith("@") and not (field == "writable_directories" and value == "@task.authorized_paths"):
+                    errors.append(f"role {role_id}: unknown dynamic scope token: {value}")
+        for capability in scope.get("task_granted_capabilities", []):
+            if capability not in allowed:
+                errors.append(f"role {role_id}: task-granted capability must also be allowed: {capability}")
+
+    required_gate_capable = {"wiki.write", "external.write", "vcs.push", "vcs.pr_create", "vcs.merge", "deploy.execute", "destructive.execute"}
+    for capability in sorted(required_gate_capable):
+        if capability not in capabilities or not capabilities[capability].get("gate_capable", False):
+            errors.append(f"capability registry: sensitive capability must be gate-capable: {capability}")
 
     transitions = registry.get("routing_policy", {}).get("allowed_transitions", {})
     for source, destinations in transitions.items():
@@ -223,6 +268,15 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
             for artifact_type in node.get("requires", []) + node.get("produces", []):
                 if artifact_type not in artifact_types:
                     errors.append(f"workflow {workflow_id}: node {node.get('id')} references unknown artifact type {artifact_type}")
+            for action in node.get("actions", []):
+                capability = action.get("capability")
+                if capability not in capabilities:
+                    errors.append(f"workflow {workflow_id}: node {node.get('id')} references unknown capability {capability}")
+                if node.get("type") == "task" and node.get("role_id") in roles:
+                    policy = roles[node["role_id"]].get("capability_policy", {})
+                    granted = set(policy.get("allowed", [])) | {item.get("capability") for item in policy.get("gated", [])}
+                    if capability not in granted:
+                        errors.append(f"workflow {workflow_id}: node {node.get('id')} declares capability not granted to role: {capability}")
         for required_gate in workflow.get("required_gates", []):
             if required_gate not in present_gates:
                 errors.append(f"workflow {workflow_id}: required gate is missing: {required_gate}")

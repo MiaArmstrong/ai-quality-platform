@@ -42,6 +42,7 @@ class CompiledSystem:
     registry: Mapping[str, Any]
     workflows: Mapping[str, Any]
     artifact_types: tuple[str, ...]
+    capabilities: Mapping[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class CompiledSystem:
             "registry": _thaw(self.registry),
             "workflows": _thaw(self.workflows),
             "artifact_types": list(self.artifact_types),
+            "capabilities": _thaw(self.capabilities),
         }
 
 
@@ -66,7 +68,9 @@ def compile_system(root: Path) -> CompiledSystem:
         raise CompilationError("\n".join(errors))
     artifact_doc = load_json(root / registry["artifact_types_file"])
     artifact_types = tuple(artifact_doc["artifact_types"])
-    referenced = {".agents/agent-registry.yaml", registry["artifact_types_file"]}
+    capability_doc = load_json(root / registry["capability_registry_file"])
+    capabilities = {item["id"]: item for item in capability_doc["capabilities"]}
+    referenced = {".agents/agent-registry.yaml", registry["artifact_types_file"], registry["capability_registry_file"]}
     referenced.update(item["role_file"] for item in registry["agents"].values())
     referenced.update(item["skill_file"] for item in registry["skills"].values())
     referenced.update(item["standard_file"] for item in registry["standards"].values())
@@ -79,6 +83,7 @@ def compile_system(root: Path) -> CompiledSystem:
         "registry": registry,
         "workflows": workflows,
         "artifact_types": artifact_types,
+        "capabilities": capabilities,
     }
     snapshot_hash = _hash(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
     return CompiledSystem(
@@ -88,4 +93,5 @@ def compile_system(root: Path) -> CompiledSystem:
         _freeze(registry),
         _freeze(workflows),
         artifact_types,
+        _freeze(capabilities),
     )
