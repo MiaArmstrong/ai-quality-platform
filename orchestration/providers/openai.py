@@ -9,10 +9,18 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 
 from .base import ExecutionRequest, ExecutionResult, ExecutionTelemetry
+from .openai_schema import make_openai_structured_output_schema
 
 
 class ProviderConfigurationError(ValueError):
     pass
+
+
+class OpenAIProviderRequestError(RuntimeError):
+    def __init__(self, *, status: int | None, error_type: str | None, code: str | None, param: str | None, message: str):
+        self.status, self.error_type, self.code, self.param = status, error_type, code, param
+        self.safe_message = message
+        super().__init__(f"OpenAI request rejected (status={status}, type={error_type}, code={code}, param={param}): {message}")
 
 
 @dataclass(frozen=True)
@@ -58,14 +66,20 @@ class OpenAIProvider:
         from orchestration.context import ContextCompiler
 
         model = self.config.resolve_model(request.model_tier)
+        provider_schema = make_openai_structured_output_schema(request.output_contract)
         instructions, input_text = ContextCompiler.render(request)
         started = time.perf_counter()
-        response = self.client.responses.create(
-            model=model,
-            instructions=instructions,
-            input=input_text,
-            text={"format": {"type": "json_schema", "name": "role_execution", "strict": True, "schema": request.output_contract}},
-        )
+        try:
+            response = self.client.responses.create(
+                model=model,
+                instructions=instructions,
+                input=input_text,
+                text={"format": {"type": "json_schema", "name": "role_execution", "strict": True, "schema": provider_schema}},
+            )
+        except Exception as exc:
+            if exc.__class__.__name__ != "BadRequestError" and getattr(exc, "status_code", None) != 400:
+                raise
+            raise self._safe_bad_request(exc) from None
         latency_ms = round((time.perf_counter() - started) * 1000)
         raw = getattr(response, "output_text", None)
         usage = getattr(response, "usage", None)
@@ -87,6 +101,20 @@ class OpenAIProvider:
         if errors:
             return ExecutionResult("failure", "schema_validation_failed", {}, telemetry, raw, getattr(response, "id", None), errors)
         return ExecutionResult(parsed["outcome"], parsed["reason_code"], parsed["artifacts"], telemetry, raw, getattr(response, "id", None))
+
+    def _safe_bad_request(self, exc: Exception) -> OpenAIProviderRequestError:
+        body = getattr(exc, "body", None)
+        error = body.get("error", body) if isinstance(body, dict) else {}
+        message = str(error.get("message") or getattr(exc, "message", None) or "OpenAI rejected the request")
+        if self.config.api_key:
+            message = message.replace(self.config.api_key, "[REDACTED]")
+        import re
+        message = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", message)
+        message = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "[REDACTED]", message)[:1000]
+        return OpenAIProviderRequestError(
+            status=getattr(exc, "status_code", 400),
+            error_type=error.get("type"), code=error.get("code"), param=error.get("param"), message=message,
+        )
 
     def _estimate_cost(self, model: str, usage: Any) -> float | None:
         if not self.config.pricing or model not in self.config.pricing or usage is None:

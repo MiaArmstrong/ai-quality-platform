@@ -20,6 +20,13 @@ The runtime validates output again, preserves malformed originals and errors,
 and permits one explicit repair attempt. An `escalate` result creates a new
 attempt only through a registry-approved tier transition.
 
+Before any request, the adapter projects canonical contracts onto OpenAI's
+documented Structured Outputs subset and validates every nested object,
+required field, and keyword. Constraints not supported by the provider (such as
+`minLength`) remain in the canonical contract and are enforced after response;
+unsafe composition keywords fail locally. HTTP 400 diagnostics expose only
+status, error type/code, parameter, and a sanitized bounded message.
+
 Model access grants no tool or action authority. The adapter exposes no tools;
 declared actions are independently checked by `AuthorizationService`. This is
 an application-level control, not an OS sandbox.

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,8 @@ from orchestration.authorization import AuthorizationService
 from orchestration.context import ContextCompiler
 from orchestration.provider_executor import ProviderRoleExecutor, RoleDispatchExecutor
 from orchestration.providers.base import ExecutionRequest
-from orchestration.providers.openai import OpenAIProvider, OpenAIProviderConfig, ProviderConfigurationError
+from orchestration.providers.openai import OpenAIProvider, OpenAIProviderConfig, OpenAIProviderRequestError, ProviderConfigurationError
+from orchestration.providers.openai_schema import OpenAISchemaCompatibilityError, make_openai_structured_output_schema, validate_openai_structured_output_schema
 from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
 from tools.smoke_openai_provider import EXPECTED_ARTIFACTS, MAX_PROVIDER_ATTEMPTS, validate_smoke_result
 
@@ -33,6 +35,12 @@ class FakeResponses:
             id=f"resp-{len(self.calls)}", model=kwargs["model"], output_text=raw,
             usage=SimpleNamespace(input_tokens=11, output_tokens=7, input_tokens_details=SimpleNamespace(cached_tokens=3)),
         )
+
+
+class BadRequestError(Exception):
+    def __init__(self, api_key):
+        self.status_code = 400
+        self.body = {"error": {"type": "invalid_request_error", "code": "invalid_json_schema", "param": "text.format.schema", "message": f"Invalid schema; bearer {api_key}"}}
 
 
 def artifact_payload(escalate=False):
@@ -69,6 +77,29 @@ class ContextCompilerTests(unittest.TestCase):
         self.assertNotIn("implementer", request.role_instructions.lower())
         self.assertEqual(64, len(next(iter(request.source_hashes.values()))))
 
+    def test_openai_compatibility_validator_reproduces_legacy_envelope_failure(self):
+        compiled = compile_system(ROOT)
+        request = ContextCompiler(ROOT, compiled).compile(role_id="architect", task="design", workflow_context={}, inputs={"work_item": {}}, tier="high_reasoning", produces=["automation_design", "sources_of_record"], authorization_context={}, attempt=1)
+        legacy = json.loads(json.dumps(request.output_contract))
+        legacy["properties"]["outcome"].pop("type")
+        with self.assertRaises(OpenAISchemaCompatibilityError) as raised:
+            validate_openai_structured_output_schema(legacy)
+        joined = " ".join(raised.exception.errors)
+        self.assertIn("must declare type", joined)
+        self.assertIn("minLength", joined)
+
+    def test_provider_projection_preserves_canonical_schema_and_is_compatible(self):
+        request = ContextCompiler(ROOT, compile_system(ROOT)).compile(role_id="architect", task="design", workflow_context={}, inputs={"work_item": {}}, tier="high_reasoning", produces=["automation_design", "sources_of_record"], authorization_context={}, attempt=1)
+        projected = make_openai_structured_output_schema(request.output_contract)
+        validate_openai_structured_output_schema(projected)
+        self.assertIn("minLength", request.output_contract["properties"]["reason_code"])
+        self.assertNotIn("minLength", projected["properties"]["reason_code"])
+        self.assertEqual("string", projected["properties"]["outcome"]["type"])
+
+    def test_unsafe_composition_is_not_silently_removed(self):
+        with self.assertRaisesRegex(OpenAISchemaCompatibilityError, "allOf"):
+            make_openai_structured_output_schema({"type": "object", "properties": {}, "required": [], "additionalProperties": False, "allOf": []})
+
 
 class OpenAIProviderTests(unittest.TestCase):
     def request(self):
@@ -89,6 +120,9 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertTrue(responses.calls[0]["text"]["format"]["strict"])
         self.assertNotIn("tools", responses.calls[0])
         self.assertNotIn("synthetic", json.dumps(responses.calls[0]))
+        sent_schema = responses.calls[0]["text"]["format"]["schema"]
+        validate_openai_structured_output_schema(sent_schema)
+        self.assertEqual({"type", "name", "strict", "schema"}, set(responses.calls[0]["text"]["format"]))
 
     def test_malformed_and_schema_invalid_output_are_not_coerced(self):
         malformed, _ = self.provider(["not-json"])
@@ -97,6 +131,33 @@ class OpenAIProviderTests(unittest.TestCase):
         result = invalid.execute(self.request())
         self.assertEqual("schema_validation_failed", result.reason_code)
         self.assertTrue(result.validation_errors)
+
+    def test_provider_projection_does_not_weaken_canonical_result_validation(self):
+        payload = artifact_payload()
+        payload["artifacts"]["automation_design"]["summary"] = ""
+        provider, _ = self.provider([json.dumps(payload)])
+        result = provider.execute(self.request())
+        self.assertEqual("schema_validation_failed", result.reason_code)
+        self.assertTrue(any("should be non-empty" in error for error in result.validation_errors))
+
+    def test_bad_request_exposes_only_safe_diagnostics(self):
+        api_key = "sk-secret-value-12345678"
+        provider = OpenAIProvider(OpenAIProviderConfig(api_key, {"high_reasoning": "configured-model"}), SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: (_ for _ in ()).throw(BadRequestError(api_key)))))
+        with self.assertRaises(OpenAIProviderRequestError) as raised:
+            provider.execute(self.request())
+        error = raised.exception
+        self.assertEqual((400, "invalid_request_error", "invalid_json_schema", "text.format.schema"), (error.status, error.error_type, error.code, error.param))
+        self.assertNotIn(api_key, str(error))
+        self.assertIn("[REDACTED]", str(error))
+
+    def test_provider_rejects_incompatible_schema_before_api_call(self):
+        provider, responses = self.provider([json.dumps(artifact_payload())])
+        request = self.request()
+        incompatible = dict(request.output_contract)
+        incompatible["allOf"] = []
+        with self.assertRaisesRegex(OpenAISchemaCompatibilityError, "allOf"):
+            provider.execute(replace(request, output_contract=incompatible))
+        self.assertEqual([], responses.calls)
 
 
 class ProviderRuntimeTests(unittest.TestCase):

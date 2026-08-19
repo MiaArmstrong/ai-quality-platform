@@ -36,6 +36,7 @@ class ContextCompiler:
 
     def compile(self, *, role_id: str, task: str, workflow_context: dict[str, Any], inputs: dict[str, Any], tier: str, produces: list[str], authorization_context: dict[str, Any], attempt: int, repair_context: dict[str, Any] | None = None) -> ExecutionRequest:
         role = self.compiled.registry["agents"][role_id]
+        produces = list(produces)
         role_text, role_hash = self._read(role["role_file"])
         hashes = {role["role_file"]: role_hash}
         skills: dict[str, str] = {}
@@ -65,7 +66,7 @@ class ContextCompiler:
             "type": "object",
             "required": ["outcome", "reason_code", "artifacts"],
             "properties": {
-                "outcome": {"enum": ["success", "escalate", "failure"]},
+                "outcome": {"type": "string", "enum": ["success", "escalate", "failure"]},
                 "reason_code": {"type": "string", "minLength": 1},
                 "artifacts": {"type": "object", "required": produces, "properties": contracts, "additionalProperties": False},
             },
