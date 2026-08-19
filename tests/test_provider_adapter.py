@@ -15,6 +15,7 @@ from orchestration.provider_executor import ProviderRoleExecutor, RoleDispatchEx
 from orchestration.providers.base import ExecutionRequest
 from orchestration.providers.openai import OpenAIProvider, OpenAIProviderConfig, ProviderConfigurationError
 from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
+from tools.smoke_openai_provider import EXPECTED_ARTIFACTS, MAX_PROVIDER_ATTEMPTS, validate_smoke_result
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,9 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual((11, 7, 3), (result.telemetry.input_tokens, result.telemetry.output_tokens, result.telemetry.cached_tokens))
         self.assertIsNone(result.telemetry.estimated_cost)
         self.assertEqual("json_schema", responses.calls[0]["text"]["format"]["type"])
+        self.assertTrue(responses.calls[0]["text"]["format"]["strict"])
+        self.assertNotIn("tools", responses.calls[0])
+        self.assertNotIn("synthetic", json.dumps(responses.calls[0]))
 
     def test_malformed_and_schema_invalid_output_are_not_coerced(self):
         malformed, _ = self.provider(["not-json"])
@@ -124,6 +128,24 @@ class ProviderRuntimeTests(unittest.TestCase):
         provider_rows = self.store.connection.execute("SELECT model,input_tokens FROM provider_attempts WHERE run_id=?", (run_id,)).fetchall()
         self.assertEqual([("high", 11)], [tuple(row) for row in provider_rows])
         self.assertIn(("design_critique", 1), engine.executor.fallback.calls)
+
+    def test_smoke_requires_and_validates_both_architect_artifacts(self):
+        engine = self.engine([artifact_payload()])
+        run_id = engine.start({"id": "SMOKE-CONTRACT-1"})
+        result = validate_smoke_result(self.compiled, self.store, run_id)
+        self.assertEqual(set(EXPECTED_ARTIFACTS), set(result["artifact_validation"]))
+        self.assertTrue(all(item["valid"] for item in result["artifact_validation"].values()))
+        self.assertEqual(1, result["attempts"])
+        self.assertLessEqual(result["attempts"], MAX_PROVIDER_ATTEMPTS)
+        self.assertFalse(result["repair_used"])
+        self.assertFalse(result["escalated"])
+
+    def test_smoke_rejects_a_missing_architect_artifact(self):
+        engine = self.engine([artifact_payload()])
+        run_id = engine.start({"id": "SMOKE-CONTRACT-2"})
+        self.store.connection.execute("UPDATE artifacts SET active=0 WHERE run_id=? AND artifact_type='sources_of_record'", (run_id,))
+        with self.assertRaisesRegex(RuntimeError, "sources_of_record"):
+            validate_smoke_result(self.compiled, self.store, run_id)
 
     def test_invalid_output_repairs_once_and_preserves_both_attempts(self):
         engine = self.engine(["bad-json", artifact_payload()])

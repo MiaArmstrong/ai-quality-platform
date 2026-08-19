@@ -38,7 +38,10 @@ Telemetry records provider, model, latency, attempt, input/output tokens, cached
 tokens when available, and cost only when pricing is explicitly configured.
 
 The optional smoke test is disabled by default and runs one harmless, read-only
-Architect task with no tools or outward actions:
+Architect task with no tools or outward actions. Success requires both declared
+Architect artifacts (`automation_design` and `sources_of_record`) to pass their
+individual contracts. The smoke test permits one initial provider attempt and
+one repair attempt only for invalid structured output; Architect does not escalate:
 
 ```text
 $env:AQP_RUN_OPENAI_SMOKE='1'
