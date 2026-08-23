@@ -10,4 +10,13 @@
   explicit types, every object property required, `additionalProperties: false`,
   and no unsupported composition. Canonical-only constraints are revalidated
   after response rather than discarded.
+- A 2026-08-23 Architect smoke retry reached the Responses API but returned an
+  empty-detail HTTP 400 before model execution. Preserve the SDK error body in
+  either direct or nested form and the safe `x-request-id`; do not infer schema
+  rejection from status alone.
+- The successful 2026-08-23 smoke exposed a schema-valid semantic conflict:
+  `outcome=success` with Architect `escalation_requested=true`. Provider outputs
+  now require provider-neutral semantic validation before artifact acceptance;
+  repairable invalid output gets one repair and retains both raw evidence and
+  structured findings.
 - See `orchestration/README.md` for the maintained operational contract.

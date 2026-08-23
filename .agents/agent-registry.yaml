@@ -14,6 +14,8 @@ enums:
     - "INSUFFICIENT_EVIDENCE"
   gate_types: ["design_approval", "qa_signoff", "release_approval", "knowledge_publication_approval"]
   command_categories: ["read_only", "test", "build", "write_local", "vcs_local", "network", "destructive"]
+  semantic_validation_statuses: ["VALID", "INVALID", "WARNING"]
+  semantic_validation_severities: ["ERROR", "WARNING"]
 
 providers:
   openai:
@@ -281,6 +283,7 @@ schemas:
   artifact_handoff: ".agents/schemas/artifact-handoff.v1.schema.json"
   routing_event: ".agents/schemas/routing-event.v1.schema.json"
   human_gate: ".agents/schemas/human-gate.v1.schema.json"
+  semantic_validation_result: ".agents/schemas/semantic-validation-result.v1.schema.json"
 
 telemetry:
   enabled: true
@@ -303,4 +306,9 @@ telemetry:
     - transition
     - transition_reason
     - verifier_result
+    - semantic_validation_status
+    - semantic_validation
+    - semantic_rule_ids
+    - repair_attempted
+    - repair_succeeded
     - timestamp

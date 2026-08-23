@@ -20,6 +20,20 @@ The runtime validates output again, preserves malformed originals and errors,
 and permits one explicit repair attempt. An `escalate` result creates a new
 attempt only through a registry-approved tier transition.
 
+Schema-valid provider output then passes through a provider-neutral semantic
+validation stage before any artifact is accepted. Semantic findings use the
+versioned `.agents/schemas/semantic-validation-result.v1.schema.json` contract
+with `VALID`, `INVALID`, and `WARNING` results. `INVALID` repairable output is
+preserved as provider-attempt evidence and receives the same single repair
+opportunity; artifacts are persisted only after schema and semantic validation
+both pass. Failed repair leaves the workflow in `FAILED` with both raw responses,
+structured findings, triggered rule IDs, and repair telemetry retained.
+
+The initial Architect rules reject a successful result that simultaneously sets
+`automation_design.escalation_requested` and reject escalation requests when the
+registered Architect role has no higher tier. This prevents highest-tier
+escalation requests from being silently ignored.
+
 Before any request, the adapter projects canonical contracts onto OpenAI's
 documented Structured Outputs subset and validates every nested object,
 required field, and keyword. Constraints not supported by the provider (such as
@@ -42,7 +56,8 @@ AQP_OPENAI_MODEL_HIGH_REASONING=<model-id>
 ```
 
 Telemetry records provider, model, latency, attempt, input/output tokens, cached
-tokens when available, and cost only when pricing is explicitly configured.
+tokens when available, semantic-validation status/findings/rule IDs, repair
+attempt/success, and cost only when pricing is explicitly configured.
 
 The optional smoke test is disabled by default and runs one harmless, read-only
 Architect task with no tools or outward actions. Success requires both declared

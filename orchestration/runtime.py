@@ -97,7 +97,7 @@ class SQLiteEventStore:
         CREATE TABLE IF NOT EXISTS task_attempts(run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, role_id TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL, outcome TEXT, started_at TEXT NOT NULL, finished_at TEXT, PRIMARY KEY(run_id,node_id,attempt));
         CREATE TABLE IF NOT EXISTS routing_events(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, workflow_id TEXT NOT NULL, task_id TEXT NOT NULL, role_id TEXT NOT NULL, requested_tier TEXT NOT NULL, selected_tier TEXT NOT NULL, reason_code TEXT NOT NULL, transition TEXT NOT NULL, attempt INTEGER NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS gates(gate_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL, gate_type TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL, requested_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT, reason TEXT, policy_version TEXT, approved_resource_hashes_json TEXT);
-        CREATE TABLE IF NOT EXISTS provider_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, latency_ms INTEGER NOT NULL, estimated_cost REAL, response_id TEXT, raw_output TEXT, validation_errors_json TEXT NOT NULL, source_hashes_json TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS provider_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, latency_ms INTEGER NOT NULL, estimated_cost REAL, response_id TEXT, raw_output TEXT, validation_errors_json TEXT NOT NULL, semantic_validation_status TEXT, semantic_rule_ids_json TEXT NOT NULL DEFAULT '[]', semantic_validation_json TEXT, repair_attempted INTEGER NOT NULL DEFAULT 0, repair_succeeded INTEGER NOT NULL DEFAULT 0, source_hashes_json TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS findings(finding_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
         """)
         gate_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(gates)")}
@@ -105,6 +105,16 @@ class SQLiteEventStore:
             self.connection.execute("ALTER TABLE gates ADD COLUMN policy_version TEXT")
         if "approved_resource_hashes_json" not in gate_columns:
             self.connection.execute("ALTER TABLE gates ADD COLUMN approved_resource_hashes_json TEXT")
+        provider_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(provider_attempts)")}
+        for name, declaration in {
+            "semantic_validation_status": "TEXT",
+            "semantic_rule_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "semantic_validation_json": "TEXT",
+            "repair_attempted": "INTEGER NOT NULL DEFAULT 0",
+            "repair_succeeded": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in provider_columns:
+                self.connection.execute(f"ALTER TABLE provider_attempts ADD COLUMN {name} {declaration}")
         self.connection.commit()
 
     def event(self, run_id: str, event_type: str, node_id: str | None = None, task_id: str | None = None, **payload: Any) -> None:
@@ -208,19 +218,29 @@ class OrchestrationEngine:
             outcome=result["outcome"]
             if "telemetry" in result:
                 telemetry=result["telemetry"]
-                self.store.connection.execute("INSERT INTO provider_attempts(run_id,node_id,attempt,provider,model,input_tokens,output_tokens,cached_tokens,latency_ms,estimated_cost,response_id,raw_output,validation_errors_json,source_hashes_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run_id,node["id"],attempt,telemetry["provider"],telemetry["model"],telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("cached_tokens"),telemetry["latency_ms"],telemetry.get("estimated_cost"),result.get("provider_response_id"),result.get("raw_output"),json.dumps(result.get("validation_errors",[])),json.dumps(result.get("source_hashes",{}),sort_keys=True),utcnow()))
-                self.store.event(run_id,"provider_attempt_recorded",node["id"],node["id"],attempt=attempt,provider=telemetry["provider"],model=telemetry["model"],latency_ms=telemetry["latency_ms"],input_tokens=telemetry.get("input_tokens"),output_tokens=telemetry.get("output_tokens"),cached_tokens=telemetry.get("cached_tokens"),validation_errors=result.get("validation_errors",[]),source_hashes=result.get("source_hashes",{}))
-            if outcome=="failure" and result.get("reason_code") in {"malformed_json","schema_validation_failed","provider_no_output"}:
+                semantic=result.get("semantic_validation") or {}
+                self.store.connection.execute("INSERT INTO provider_attempts(run_id,node_id,attempt,provider,model,input_tokens,output_tokens,cached_tokens,latency_ms,estimated_cost,response_id,raw_output,validation_errors_json,semantic_validation_status,semantic_rule_ids_json,semantic_validation_json,repair_attempted,repair_succeeded,source_hashes_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run_id,node["id"],attempt,telemetry["provider"],telemetry["model"],telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("cached_tokens"),telemetry["latency_ms"],telemetry.get("estimated_cost"),result.get("provider_response_id"),result.get("raw_output"),json.dumps(result.get("validation_errors",[])),semantic.get("status"),json.dumps(semantic.get("rule_ids",[])),json.dumps(semantic,sort_keys=True) if semantic else None,0,0,json.dumps(result.get("source_hashes",{}),sort_keys=True),utcnow()))
+                self.store.event(run_id,"provider_attempt_recorded",node["id"],node["id"],attempt=attempt,provider=telemetry["provider"],model=telemetry["model"],latency_ms=telemetry["latency_ms"],input_tokens=telemetry.get("input_tokens"),output_tokens=telemetry.get("output_tokens"),cached_tokens=telemetry.get("cached_tokens"),validation_errors=result.get("validation_errors",[]),semantic_validation=semantic or None,semantic_validation_status=semantic.get("status"),semantic_rule_ids=semantic.get("rule_ids",[]),repair_attempted=repair_context is not None,source_hashes=result.get("source_hashes",{}))
+            invalid_reason=result.get("reason_code") in {"malformed_json","schema_validation_failed","provider_no_output","semantic_validation_failed"}
+            if outcome=="failure" and invalid_reason:
                 self.store.connection.execute("UPDATE task_attempts SET status='INVALID_OUTPUT',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(result["reason_code"],utcnow(),run_id,node["id"],attempt))
-                if not repair_used:
+                semantic=result.get("semantic_validation") or {}
+                repairable=result["reason_code"] != "semantic_validation_failed" or semantic.get("repairable") is True
+                if not repair_used and repairable:
                     repair_used=True
-                    repair_context={"original_output": result.get("raw_output"), "validation_errors": result.get("validation_errors", []), "original_output_hash": content_hash(result.get("raw_output"))}
+                    repair_context={"original_output": result.get("raw_output"), "validation_errors": result.get("validation_errors", []), "semantic_validation": semantic, "original_output_hash": content_hash(result.get("raw_output"))}
+                    self.store.connection.execute("UPDATE provider_attempts SET repair_attempted=1 WHERE run_id=? AND node_id=? AND attempt=?",(run_id,node["id"],attempt))
                     attempt+=1
-                    self.store.event(run_id,"provider_repair_requested",node["id"],node["id"],attempt=attempt,original_output_hash=repair_context["original_output_hash"])
+                    self.store.event(run_id,"provider_repair_requested",node["id"],node["id"],attempt=attempt,original_output_hash=repair_context["original_output_hash"],reason_code=result["reason_code"],semantic_rule_ids=semantic.get("rule_ids",[]))
                     continue
+                if repair_used and "telemetry" in result:
+                    self.store.event(run_id,"provider_repair_completed",node["id"],node["id"],attempt=attempt,succeeded=False,semantic_validation_status=semantic.get("status"),semantic_rule_ids=semantic.get("rule_ids",[]))
                 self._set_state(run_id,"FAILED")
                 self.store.event(run_id,"task_failed",node["id"],node["id"],reason_code=result["reason_code"])
                 return
+            if repair_used and "telemetry" in result:
+                self.store.connection.execute("UPDATE provider_attempts SET repair_succeeded=1 WHERE run_id=? AND node_id=? AND attempt=?",(run_id,node["id"],attempt))
+                self.store.event(run_id,"provider_repair_completed",node["id"],node["id"],attempt=attempt,succeeded=True,semantic_validation_status=(result.get("semantic_validation") or {}).get("status"))
             if outcome=="escalate":
                 for artifact_type,content in result.get("artifacts", {}).items():
                     self._artifact(run_id,artifact_type,node["id"],content)

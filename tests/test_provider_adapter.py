@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from jsonschema import Draft202012Validator
+
 from orchestration.compiler import compile_system
 from orchestration.authorization import AuthorizationService
 from orchestration.context import ContextCompiler
@@ -17,6 +19,7 @@ from orchestration.providers.base import ExecutionRequest
 from orchestration.providers.openai import OpenAIProvider, OpenAIProviderConfig, OpenAIProviderRequestError, ProviderConfigurationError
 from orchestration.providers.openai_schema import OpenAISchemaCompatibilityError, make_openai_structured_output_schema, validate_openai_structured_output_schema
 from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
+from orchestration.semantic_validation import SemanticOutputValidator
 from tools.smoke_openai_provider import EXPECTED_ARTIFACTS, MAX_PROVIDER_ATTEMPTS, validate_smoke_result
 
 
@@ -41,6 +44,14 @@ class BadRequestError(Exception):
     def __init__(self, api_key):
         self.status_code = 400
         self.body = {"error": {"type": "invalid_request_error", "code": "invalid_json_schema", "param": "text.format.schema", "message": f"Invalid schema; bearer {api_key}"}}
+        self.request_id = "req_safe_123"
+
+
+class DirectBadRequestError(Exception):
+    def __init__(self):
+        self.status_code = 400
+        self.body = {"type": "invalid_request_error", "code": "invalid_model", "param": "model", "message": "Model is unavailable"}
+        self.request_id = "req_safe_456"
 
 
 def artifact_payload(escalate=False):
@@ -53,6 +64,13 @@ def artifact_payload(escalate=False):
         "reason_code": "confidence_low" if escalate else "complete",
         "artifacts": artifacts,
     }
+
+
+def inconsistent_architect_payload():
+    payload = artifact_payload()
+    payload["artifacts"]["automation_design"]["escalation_requested"] = True
+    payload["artifacts"]["automation_design"]["confidence"] = 0.82
+    return payload
 
 
 class ProviderConfigTests(unittest.TestCase):
@@ -147,8 +165,17 @@ class OpenAIProviderTests(unittest.TestCase):
             provider.execute(self.request())
         error = raised.exception
         self.assertEqual((400, "invalid_request_error", "invalid_json_schema", "text.format.schema"), (error.status, error.error_type, error.code, error.param))
+        self.assertEqual("req_safe_123", error.request_id)
         self.assertNotIn(api_key, str(error))
         self.assertIn("[REDACTED]", str(error))
+
+    def test_bad_request_accepts_sdk_direct_error_body(self):
+        provider = OpenAIProvider(OpenAIProviderConfig("synthetic", {"high_reasoning": "configured-model"}), SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: (_ for _ in ()).throw(DirectBadRequestError()))))
+        with self.assertRaises(OpenAIProviderRequestError) as raised:
+            provider.execute(self.request())
+        error = raised.exception
+        self.assertEqual(("invalid_request_error", "invalid_model", "model", "req_safe_456"), (error.error_type, error.code, error.param, error.request_id))
+        self.assertIn("Model is unavailable", error.safe_message)
 
     def test_provider_rejects_incompatible_schema_before_api_call(self):
         provider, responses = self.provider([json.dumps(artifact_payload())])
@@ -158,6 +185,34 @@ class OpenAIProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(OpenAISchemaCompatibilityError, "allOf"):
             provider.execute(replace(request, output_contract=incompatible))
         self.assertEqual([], responses.calls)
+
+
+class SemanticOutputValidationTests(unittest.TestCase):
+    def test_exact_smoke_inconsistency_is_schema_valid_but_semantically_invalid(self):
+        payload = inconsistent_architect_payload()
+        request = ContextCompiler(ROOT, compile_system(ROOT)).compile(role_id="architect", task="design", workflow_context={}, inputs={"work_item": {}}, tier="high_reasoning", produces=["automation_design", "sources_of_record"], authorization_context={}, attempt=1)
+        self.assertEqual([], list(Draft202012Validator(request.output_contract).iter_errors(payload)))
+
+        result = SemanticOutputValidator().validate(
+            role_id="architect", outcome=payload["outcome"], artifacts=payload["artifacts"], escalation_available=False,
+        )
+        self.assertEqual("INVALID", result.status)
+        self.assertTrue(result.repairable)
+        self.assertEqual(
+            {"architect_escalation_success_conflict/v1", "architect_escalation_unavailable_tier/v1"},
+            set(result.rule_ids),
+        )
+        self.assertTrue(all(item.artifact_type == "automation_design" for item in result.findings))
+        self.assertTrue(all(item.field_paths and item.severity == "ERROR" for item in result.findings))
+        schema = json.loads((ROOT / ".agents/schemas/semantic-validation-result.v1.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual([], list(Draft202012Validator(schema).iter_errors(result.as_dict())))
+
+    def test_valid_architect_result_has_structured_valid_status(self):
+        payload = artifact_payload()
+        result = SemanticOutputValidator().validate(
+            role_id="architect", outcome=payload["outcome"], artifacts=payload["artifacts"], escalation_available=False,
+        )
+        self.assertEqual({"status": "VALID", "rule_ids": [], "repairable": False, "findings": []}, result.as_dict())
 
 
 class ProviderRuntimeTests(unittest.TestCase):
@@ -213,6 +268,52 @@ class ProviderRuntimeTests(unittest.TestCase):
         run_id = engine.start({"id": "REPAIR-1"})
         rows = self.store.connection.execute("SELECT raw_output,validation_errors_json FROM provider_attempts WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
         self.assertEqual(2, len(rows)); self.assertEqual("bad-json", rows[0]["raw_output"])
+
+    def test_semantic_inconsistency_repairs_once_before_artifact_acceptance(self):
+        engine = self.engine([inconsistent_architect_payload(), artifact_payload()])
+        run_id = engine.start({"id": "SEMANTIC-REPAIR-1"})
+        rows = self.store.connection.execute(
+            "SELECT semantic_validation_status,semantic_rule_ids_json,semantic_validation_json,repair_attempted,repair_succeeded,raw_output FROM provider_attempts WHERE run_id=? ORDER BY attempt", (run_id,)
+        ).fetchall()
+        self.assertEqual(2, len(rows))
+        self.assertEqual(("INVALID", 1, 0), (rows[0]["semantic_validation_status"], rows[0]["repair_attempted"], rows[0]["repair_succeeded"]))
+        self.assertEqual(("VALID", 0, 1), (rows[1]["semantic_validation_status"], rows[1]["repair_attempted"], rows[1]["repair_succeeded"]))
+        self.assertIn("architect_escalation_success_conflict/v1", json.loads(rows[0]["semantic_rule_ids_json"]))
+        self.assertEqual("INVALID", json.loads(rows[0]["semantic_validation_json"])["status"])
+        self.assertIn('"escalation_requested": true', rows[0]["raw_output"])
+        artifacts = self.store.connection.execute(
+            "SELECT artifact_type,COUNT(*) FROM artifacts WHERE run_id=? AND producer_node='design' GROUP BY artifact_type", (run_id,)
+        ).fetchall()
+        self.assertEqual([("automation_design", 1), ("sources_of_record", 1)], [tuple(row) for row in artifacts])
+        events = self.store.events(run_id)
+        self.assertTrue(any(item["event_type"] == "provider_repair_requested" and item["payload"]["semantic_rule_ids"] for item in events))
+        self.assertTrue(any(item["event_type"] == "provider_repair_completed" and item["payload"]["succeeded"] is True for item in events))
+
+    def test_failed_semantic_repair_preserves_evidence_and_accepts_no_artifacts(self):
+        engine = self.engine([inconsistent_architect_payload(), inconsistent_architect_payload()])
+        run_id = engine.start({"id": "SEMANTIC-REPAIR-2"})
+        self.assertEqual("FAILED", self.store.run(run_id)["state"])
+        count = self.store.connection.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE run_id=? AND producer_node='design'", (run_id,)
+        ).fetchone()[0]
+        self.assertEqual(0, count)
+        attempts = self.store.connection.execute(
+            "SELECT semantic_validation_status,raw_output,repair_succeeded FROM provider_attempts WHERE run_id=? ORDER BY attempt", (run_id,)
+        ).fetchall()
+        self.assertEqual(2, len(attempts))
+        self.assertTrue(all(row["semantic_validation_status"] == "INVALID" and row["raw_output"] for row in attempts))
+        self.assertTrue(all(row["repair_succeeded"] == 0 for row in attempts))
+        self.assertTrue(any(item["event_type"] == "provider_repair_completed" and item["payload"]["succeeded"] is False for item in self.store.events(run_id)))
+
+    def test_highest_tier_escalation_request_is_repaired_not_silently_ignored(self):
+        engine = self.engine([artifact_payload(escalate=True), artifact_payload()])
+        run_id = engine.start({"id": "SEMANTIC-HIGHEST-TIER"})
+        rows = self.store.connection.execute(
+            "SELECT semantic_validation_status,semantic_rule_ids_json FROM provider_attempts WHERE run_id=? ORDER BY attempt", (run_id,)
+        ).fetchall()
+        self.assertEqual(2, len(rows))
+        self.assertIn("architect_escalation_unavailable_tier/v1", json.loads(rows[0]["semantic_rule_ids_json"]))
+        self.assertEqual("VALID", rows[1]["semantic_validation_status"])
 
     def test_low_confidence_escalation_creates_new_attempt(self):
         provider = OpenAIProvider(OpenAIProviderConfig("synthetic", {"high_reasoning": "high", "standard": "standard"}), SimpleNamespace(responses=FakeResponses([json.dumps(artifact_payload(escalate=True)), json.dumps(artifact_payload())])))

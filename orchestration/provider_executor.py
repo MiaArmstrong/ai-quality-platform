@@ -6,15 +6,17 @@ from .authorization import AuthorizationService, GateApproval
 from .compiler import CompiledSystem
 from .context import ContextCompiler
 from .providers.base import ModelProvider
+from .semantic_validation import SemanticOutputValidator
 
 
 class ProviderRoleExecutor:
     """Adapts a model provider to the runtime without granting action authority."""
 
-    def __init__(self, compiler: ContextCompiler, provider: ModelProvider, authorization: AuthorizationService | None = None):
+    def __init__(self, compiler: ContextCompiler, provider: ModelProvider, authorization: AuthorizationService | None = None, semantic_validator: SemanticOutputValidator | None = None):
         self.compiler = compiler
         self.provider = provider
         self.authorization = authorization
+        self.semantic_validator = semantic_validator or SemanticOutputValidator()
 
     def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, actions: list[dict[str, Any]], task_context: dict[str, Any], gate_approvals: list[GateApproval]) -> dict[str, Any]:
         if self.authorization is None:
@@ -37,11 +39,33 @@ class ProviderRoleExecutor:
             attempt=attempt, repair_context=task_context.get("repair_context"),
         )
         result = self.provider.execute(request)
+        semantic_validation = None
+        if not result.validation_errors:
+            role = self.compiler.compiled.registry["agents"][role_id]
+            semantic_validation = self.semantic_validator.validate(
+                role_id=role_id,
+                outcome=result.outcome,
+                artifacts=result.artifacts,
+                escalation_available=role.get("escalation_tier") is not None,
+            )
+            if semantic_validation.status == "INVALID":
+                return {
+                    "outcome": "failure",
+                    "reason_code": "semantic_validation_failed",
+                    "artifacts": {},
+                    "raw_output": result.raw_output,
+                    "provider_response_id": result.provider_response_id,
+                    "validation_errors": [],
+                    "semantic_validation": semantic_validation.as_dict(),
+                    "source_hashes": dict(request.source_hashes),
+                    "telemetry": result.telemetry.__dict__,
+                }
         return {
             "outcome": result.outcome, "reason_code": result.reason_code,
             "artifacts": dict(result.artifacts), "raw_output": result.raw_output,
             "provider_response_id": result.provider_response_id,
             "validation_errors": list(result.validation_errors),
+            "semantic_validation": semantic_validation.as_dict() if semantic_validation else None,
             "source_hashes": dict(request.source_hashes),
             "telemetry": result.telemetry.__dict__,
         }

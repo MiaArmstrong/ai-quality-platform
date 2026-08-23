@@ -17,10 +17,11 @@ class ProviderConfigurationError(ValueError):
 
 
 class OpenAIProviderRequestError(RuntimeError):
-    def __init__(self, *, status: int | None, error_type: str | None, code: str | None, param: str | None, message: str):
+    def __init__(self, *, status: int | None, error_type: str | None, code: str | None, param: str | None, request_id: str | None, message: str):
         self.status, self.error_type, self.code, self.param = status, error_type, code, param
+        self.request_id = request_id
         self.safe_message = message
-        super().__init__(f"OpenAI request rejected (status={status}, type={error_type}, code={code}, param={param}): {message}")
+        super().__init__(f"OpenAI request rejected (status={status}, type={error_type}, code={code}, param={param}, request_id={request_id}): {message}")
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,14 @@ class OpenAIProvider:
     def _safe_bad_request(self, exc: Exception) -> OpenAIProviderRequestError:
         body = getattr(exc, "body", None)
         error = body.get("error", body) if isinstance(body, dict) else {}
-        message = str(error.get("message") or getattr(exc, "message", None) or "OpenAI rejected the request")
+        response = getattr(exc, "response", None)
+        if not error and response is not None:
+            try:
+                response_body = response.json()
+                error = response_body.get("error", response_body) if isinstance(response_body, dict) else {}
+            except Exception:
+                pass
+        message = str(error.get("message") or (body if isinstance(body, str) else None) or getattr(exc, "message", None) or "OpenAI rejected the request")
         if self.config.api_key:
             message = message.replace(self.config.api_key, "[REDACTED]")
         import re
@@ -113,7 +121,11 @@ class OpenAIProvider:
         message = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "[REDACTED]", message)[:1000]
         return OpenAIProviderRequestError(
             status=getattr(exc, "status_code", 400),
-            error_type=error.get("type"), code=error.get("code"), param=error.get("param"), message=message,
+            error_type=error.get("type") or getattr(exc, "type", None),
+            code=error.get("code") or getattr(exc, "code", None),
+            param=error.get("param") or getattr(exc, "param", None),
+            request_id=getattr(exc, "request_id", None),
+            message=message,
         )
 
     def _estimate_cost(self, model: str, usage: Any) -> float | None:
