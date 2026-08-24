@@ -37,6 +37,8 @@ junit.xml
 .orchestration/
 runtime-artifacts/
 demo-artifacts/
+provider-evidence/
+raw-provider-evidence/
 tmp/
 temp/
 *.log

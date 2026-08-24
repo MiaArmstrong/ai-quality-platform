@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you reference this project, please cite it using this metadata."
+title: "ai-quality-platform"
+type: software
+authors:
+  - family-names: "Armstrong"
+    given-names: "Mia"
+repository-code: "https://github.com/MiaArmstrong/ai-quality-platform"
+url: "https://github.com/MiaArmstrong/ai-quality-platform"
+abstract: >-
+  A governed multi-agent quality and reliability platform for software and AI
+  systems, developed as experimental portfolio engineering work.
