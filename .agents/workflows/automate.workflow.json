@@ -4,16 +4,16 @@
   "initial_node": "design",
   "required_gates": ["design_approval", "release_approval"],
   "nodes": [
-    {"id": "design", "type": "task", "role_id": "architect", "requires": ["work_item"], "produces": ["automation_design", "sources_of_record"]},
-    {"id": "design_critique", "type": "task", "role_id": "adversarial_verifier", "requires": ["automation_design"], "produces": ["adversarial_review"]},
+    {"id": "design", "type": "task", "role_id": "architect", "requires": ["work_item"], "produces": ["automation_design", "sources_of_record"], "actions": [{"capability": "repo.read", "resource": "."}, {"capability": "artifacts.read", "resource": "work_item"}, {"capability": "artifacts.write", "resource": "automation_design"}, {"capability": "artifacts.write", "resource": "sources_of_record"}]},
+    {"id": "design_critique", "type": "task", "role_id": "adversarial_verifier", "requires": ["automation_design"], "produces": ["adversarial_review"], "actions": [{"capability": "artifacts.read", "resource": "automation_design"}, {"capability": "artifacts.write", "resource": "adversarial_review"}]},
     {"id": "design_gate", "type": "gate", "gate_type": "design_approval", "requires": ["automation_design", "adversarial_review"], "produces": ["human_gate_evidence"]},
-    {"id": "implement", "type": "task", "role_id": "implementer", "requires": ["automation_design", "human_gate_evidence"], "produces": ["implementation_result"]},
-    {"id": "execute", "type": "task", "role_id": "test_executor", "requires": ["implementation_result"], "produces": ["test_execution_result"]},
-    {"id": "verify", "type": "task", "role_id": "adversarial_verifier", "requires": ["implementation_result", "test_execution_result"], "produces": ["verifier_result"]},
-    {"id": "triage", "type": "task", "role_id": "failure_triage_analyst", "requires": ["test_execution_result"], "produces": ["failure_triage"]},
+    {"id": "implement", "type": "task", "role_id": "implementer", "requires": ["automation_design", "human_gate_evidence"], "produces": ["implementation_result"], "actions": [{"capability": "artifacts.read", "resource": "automation_design"}, {"capability": "artifacts.read", "resource": "human_gate_evidence"}, {"capability": "artifacts.write", "resource": "implementation_result"}]},
+    {"id": "execute", "type": "task", "role_id": "test_executor", "requires": ["implementation_result"], "produces": ["test_execution_result"], "actions": [{"capability": "artifacts.read", "resource": "implementation_result"}, {"capability": "repo.execute", "resource": "tests", "command_category": "test"}, {"capability": "tests.run", "resource": "tests", "command_category": "test"}, {"capability": "artifacts.write", "resource": "test_execution_result"}]},
+    {"id": "verify", "type": "task", "role_id": "adversarial_verifier", "requires": ["implementation_result", "test_execution_result"], "produces": ["verifier_result"], "actions": [{"capability": "artifacts.read", "resource": "implementation_result"}, {"capability": "artifacts.read", "resource": "test_execution_result"}, {"capability": "artifacts.write", "resource": "verifier_result"}]},
+    {"id": "triage", "type": "task", "role_id": "failure_triage_analyst", "requires": ["test_execution_result"], "produces": ["failure_triage"], "actions": [{"capability": "artifacts.read", "resource": "test_execution_result"}, {"capability": "artifacts.write", "resource": "failure_triage"}]},
     {"id": "release_gate", "type": "gate", "gate_type": "release_approval", "requires": ["implementation_result", "test_execution_result", "verifier_result"], "produces": ["human_gate_evidence"]},
     {"id": "release_rework", "type": "state", "state": "REWORK_REQUIRED", "requires": ["human_gate_evidence"], "produces": []},
-    {"id": "knowledge_closeout", "type": "task", "role_id": "knowledge_curator", "requires": ["human_gate_evidence"], "produces": ["knowledge_curation_result"]},
+    {"id": "knowledge_closeout", "type": "task", "role_id": "knowledge_curator", "requires": ["human_gate_evidence"], "produces": ["knowledge_curation_result"], "actions": [{"capability": "artifacts.read", "resource": "human_gate_evidence"}, {"capability": "knowledge.write_working", "resource": "knowledge/mempalace/"}, {"capability": "artifacts.write", "resource": "knowledge_curation_result"}]},
     {"id": "completed", "type": "terminal", "state": "COMPLETED", "requires": ["human_gate_evidence"], "produces": []}
   ],
   "transitions": [

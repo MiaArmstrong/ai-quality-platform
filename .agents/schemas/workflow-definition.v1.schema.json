@@ -21,7 +21,8 @@
         "id": {"$ref": "#/$defs/id"}, "type": {"enum": ["task", "gate", "state", "terminal"]},
         "role_id": {"$ref": "#/$defs/id"}, "gate_type": {"$ref": "#/$defs/id"},
         "state": {"enum": ["CREATED", "CONTEXT_READY", "ROUTED", "RUNNING", "VERIFYING", "AWAITING_HUMAN", "REWORK_REQUIRED", "BLOCKED", "COMPLETED", "FAILED", "CANCELLED", "INSUFFICIENT_EVIDENCE"]},
-        "requires": {"$ref": "#/$defs/artifacts"}, "produces": {"$ref": "#/$defs/artifacts"}
+        "requires": {"$ref": "#/$defs/artifacts"}, "produces": {"$ref": "#/$defs/artifacts"},
+        "actions": {"type": "array", "items": {"type": "object", "required": ["capability", "resource"], "properties": {"capability": {"type": "string"}, "resource": {"type": "string"}, "command_category": {"type": "string"}, "external_system_category": {"type": "string"}}, "additionalProperties": false}}
       },
       "allOf": [
         {"if": {"properties": {"type": {"const": "task"}}}, "then": {"required": ["role_id"], "not": {"required": ["gate_type"]}}},

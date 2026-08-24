@@ -1,0 +1,26 @@
+{
+  "schema_version": "capability-registry/v1",
+  "capabilities": [
+    {"id": "repo.read", "category": "repository"},
+    {"id": "repo.write", "category": "repository"},
+    {"id": "repo.execute", "category": "repository"},
+    {"id": "tests.run", "category": "testing"},
+    {"id": "artifacts.read", "category": "artifacts"},
+    {"id": "artifacts.write", "category": "artifacts"},
+    {"id": "knowledge.read", "category": "knowledge"},
+    {"id": "knowledge.write_working", "category": "knowledge"},
+    {"id": "wiki.read", "category": "wiki"},
+    {"id": "wiki.propose_write", "category": "wiki"},
+    {"id": "wiki.write", "category": "wiki", "gate_capable": true},
+    {"id": "external.read", "category": "external"},
+    {"id": "external.write", "category": "external", "gate_capable": true},
+    {"id": "vcs.read", "category": "vcs"},
+    {"id": "vcs.commit", "category": "vcs", "gate_capable": true},
+    {"id": "vcs.push", "category": "vcs", "gate_capable": true},
+    {"id": "vcs.pr_create", "category": "vcs", "gate_capable": true},
+    {"id": "vcs.merge", "category": "vcs", "gate_capable": true},
+    {"id": "deploy.execute", "category": "deployment", "gate_capable": true},
+    {"id": "destructive.execute", "category": "destructive", "gate_capable": true},
+    {"id": "workflow.control", "category": "workflow"}
+  ]
+}

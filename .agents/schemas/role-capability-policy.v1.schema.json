@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "role-capability-policy/v1",
+  "type": "object",
+  "required": ["allowed", "denied", "gated", "scope"],
+  "properties": {
+    "allowed": {"$ref": "#/$defs/capabilities"},
+    "denied": {"$ref": "#/$defs/capabilities"},
+    "gated": {"type": "array", "items": {"type": "object", "required": ["capability", "gate_type"], "properties": {"capability": {"$ref": "#/$defs/capability"}, "gate_type": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}}, "additionalProperties": false}},
+    "scope": {
+      "type": "object",
+      "required": ["path_prefixes", "read_only_directories", "writable_directories", "command_categories", "external_system_categories", "task_granted_capabilities"],
+      "properties": {
+        "path_prefixes": {"$ref": "#/$defs/strings"}, "read_only_directories": {"$ref": "#/$defs/strings"}, "writable_directories": {"$ref": "#/$defs/strings"},
+        "command_categories": {"$ref": "#/$defs/ids"}, "external_system_categories": {"$ref": "#/$defs/ids"}, "task_granted_capabilities": {"$ref": "#/$defs/capabilities"}
+      }, "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"},
+    "capabilities": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/capability"}},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}}
+  }, "additionalProperties": false
+}

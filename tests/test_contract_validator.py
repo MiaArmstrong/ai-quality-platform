@@ -58,6 +58,21 @@ class ContractValidatorTests(unittest.TestCase):
         workflows["qa"]["nodes"][0]["role_id"] = "missing_role"
         self.assertTrue(any("references unknown role" in error for error in self.validate(workflows=workflows)))
 
+    def test_unknown_role_capability_is_rejected(self):
+        registry = copy.deepcopy(self.registry)
+        registry["agents"]["architect"]["capability_policy"]["allowed"].append("unknown.action")
+        self.assertTrue(any("unknown capability" in error for error in self.validate(registry)))
+
+    def test_conflicting_role_capability_is_rejected(self):
+        registry = copy.deepcopy(self.registry)
+        registry["agents"]["architect"]["capability_policy"]["denied"].append("repo.read")
+        self.assertTrue(any("conflicting capability policies" in error for error in self.validate(registry)))
+
+    def test_gated_capability_requires_valid_gate_type(self):
+        registry = copy.deepcopy(self.registry)
+        registry["agents"]["knowledge_curator"]["capability_policy"]["gated"][0]["gate_type"] = "unknown_gate"
+        self.assertTrue(any("references unknown gate type" in error for error in self.validate(registry)))
+
     def test_invalid_verdict_enum_is_rejected(self):
         registry = copy.deepcopy(self.registry)
         registry["enums"]["verifier_verdicts"][-1] = "UNKNOWN"
@@ -79,6 +94,21 @@ class ContractValidatorTests(unittest.TestCase):
         workflows = copy.deepcopy(self.workflows)
         workflows["qa"]["nodes"].append(copy.deepcopy(workflows["qa"]["nodes"][0]))
         self.assertTrue(any("duplicate node IDs" in error for error in self.validate(workflows=workflows)))
+
+    def test_executable_task_requires_artifact_io_mappings(self):
+        workflows = copy.deepcopy(self.workflows)
+        workflows["automate"]["nodes"][0]["actions"] = [item for item in workflows["automate"]["nodes"][0]["actions"] if item["resource"] != "sources_of_record"]
+        self.assertTrue(any("lacks artifacts.write for produced artifact sources_of_record" in error for error in self.validate(workflows=workflows)))
+
+    def test_task_requires_success_outcome_transition(self):
+        workflows = copy.deepcopy(self.workflows)
+        workflows["automate"]["transitions"] = [item for item in workflows["automate"]["transitions"] if not (item["from"] == "design" and item["on"] == "success")]
+        self.assertTrue(any("task design lacks a success transition" in error for error in self.validate(workflows=workflows)))
+
+    def test_duplicate_outcome_transition_is_rejected(self):
+        workflows = copy.deepcopy(self.workflows)
+        workflows["automate"]["transitions"].append(copy.deepcopy(workflows["automate"]["transitions"][0]))
+        self.assertTrue(any("duplicate outcome transitions" in error for error in self.validate(workflows=workflows)))
 
     def test_duplicate_yaml_key_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

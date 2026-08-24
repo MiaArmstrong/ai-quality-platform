@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "semantic-validation-result/v1",
+  "type": "object",
+  "required": ["status", "rule_ids", "repairable", "findings"],
+  "properties": {
+    "status": {"enum": ["VALID", "INVALID", "WARNING"]},
+    "rule_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*/v[1-9][0-9]*$"}},
+    "repairable": {"type": "boolean"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "artifact_type", "field_paths", "message", "severity", "repairable"],
+        "properties": {
+          "rule_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*/v[1-9][0-9]*$"},
+          "artifact_type": {"type": "string"},
+          "field_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "message": {"type": "string", "minLength": 1},
+          "severity": {"enum": ["ERROR", "WARNING"]},
+          "repairable": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
