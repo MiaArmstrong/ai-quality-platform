@@ -167,3 +167,9 @@ This is active, experimental portfolio engineering work. It demonstrates a
 tested architectural foundation; it is not production-ready software. The
 runtime is intentionally single-runner, real side-effect adapters are absent,
 and only the Architect provider path has completed a real-model milestone.
+
+---
+
+Copyright © 2026 Mia Armstrong. All rights reserved.
+
+See [COPYRIGHT](COPYRIGHT) for usage terms.
