@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from .compiler import CompiledSystem
 from .providers.base import ExecutionRequest
-
-
-def _digest(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _plain(value: Any) -> Any:
@@ -31,8 +26,13 @@ class ContextCompiler:
     def _read(self, relative: str) -> tuple[str, str]:
         path = (self.root / relative).resolve()
         path.relative_to(self.root)
-        text = path.read_text(encoding="utf-8")
-        return text, _digest(text)
+        data = path.read_bytes()
+        from .compiler import _hash
+        digest = _hash(data)
+        expected = self.compiled.source_hashes.get(relative)
+        if expected != digest:
+            raise ValueError(f"compiled instruction source changed: {relative}")
+        return data.decode("utf-8"), digest
 
     def compile(self, *, role_id: str, task: str, workflow_context: dict[str, Any], inputs: dict[str, Any], tier: str, produces: list[str], authorization_context: dict[str, Any], attempt: int, repair_context: dict[str, Any] | None = None) -> ExecutionRequest:
         role = self.compiled.registry["agents"][role_id]

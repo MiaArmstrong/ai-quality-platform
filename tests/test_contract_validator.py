@@ -95,6 +95,21 @@ class ContractValidatorTests(unittest.TestCase):
         workflows["qa"]["nodes"].append(copy.deepcopy(workflows["qa"]["nodes"][0]))
         self.assertTrue(any("duplicate node IDs" in error for error in self.validate(workflows=workflows)))
 
+    def test_executable_task_requires_artifact_io_mappings(self):
+        workflows = copy.deepcopy(self.workflows)
+        workflows["automate"]["nodes"][0]["actions"] = [item for item in workflows["automate"]["nodes"][0]["actions"] if item["resource"] != "sources_of_record"]
+        self.assertTrue(any("lacks artifacts.write for produced artifact sources_of_record" in error for error in self.validate(workflows=workflows)))
+
+    def test_task_requires_success_outcome_transition(self):
+        workflows = copy.deepcopy(self.workflows)
+        workflows["automate"]["transitions"] = [item for item in workflows["automate"]["transitions"] if not (item["from"] == "design" and item["on"] == "success")]
+        self.assertTrue(any("task design lacks a success transition" in error for error in self.validate(workflows=workflows)))
+
+    def test_duplicate_outcome_transition_is_rejected(self):
+        workflows = copy.deepcopy(self.workflows)
+        workflows["automate"]["transitions"].append(copy.deepcopy(workflows["automate"]["transitions"][0]))
+        self.assertTrue(any("duplicate outcome transitions" in error for error in self.validate(workflows=workflows)))
+
     def test_duplicate_yaml_key_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "duplicate.yaml"

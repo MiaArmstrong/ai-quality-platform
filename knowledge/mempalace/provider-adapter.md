@@ -19,4 +19,15 @@
   now require provider-neutral semantic validation before artifact acceptance;
   repairable invalid output gets one repair and retains both raw evidence and
   structured findings.
+- The PR #1 adversarial review found that adapter-local validation was not a
+  provider-neutral guarantee. Canonical envelope and artifact validation now
+  runs again at the provider-neutral acceptance boundary before semantic rules.
+- Provider network attempts are durably recorded as `IN_PROGRESS` before
+  dispatch. An unresolved attempt blocks automatic resume because v1 cannot
+  prove that retrying a paid request is idempotent.
+- OpenAI Responses requests set `store=False`; this disables Responses
+  application-state storage but does not supersede documented provider retention
+  or abuse-monitoring controls.
+- Raw provider output remains local evidence and is omitted from default CLI and
+  smoke inspection. The current runtime is single-runner/non-concurrent.
 - See `orchestration/README.md` for the maintained operational contract.

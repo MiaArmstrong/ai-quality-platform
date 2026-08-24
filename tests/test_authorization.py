@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from orchestration.authorization import AuthorizationService, GateApproval
 from orchestration.compiler import compile_system
-from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore, gate_approval_from_persisted_decision
+from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,9 +56,9 @@ class AuthorizationTests(unittest.TestCase):
         publish = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki"})
         self.assertEqual("ALLOW", proposal.decision)
         self.assertEqual(("REQUIRE_GATE", "knowledge_publication_approval"), (publish.decision, publish.applicable_gate))
-        approval = gate_approval_from_persisted_decision(workflow_run_id="run-1", gate_id="gate-1", gate_type="knowledge_publication_approval", capability="wiki.write", resources=["github_wiki:Architecture"], evidence_hashes=["a" * 64], approver="human", approved_at="2026-01-01T00:00:00+00:00", policy_version="role-capability-policy/v1")
-        approved = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki", "workflow_run_id": "run-1"}, [approval])
-        self.assertEqual("ALLOW", approved.decision)
+        forged = GateApproval("run-1", "gate-1", "knowledge_publication_approval", "wiki.write", ("x",), ("y",), "human", "now", "role-capability-policy/v1")
+        approved = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki", "workflow_run_id": "run-1"}, [forged])
+        self.assertEqual("REQUIRE_GATE", approved.decision)
 
     def test_merge_deploy_and_destructive_actions_require_gate(self):
         for capability, resource in (("vcs.merge", "main"), ("deploy.execute", "production"), ("destructive.execute", "fixture:42")):
@@ -62,15 +66,38 @@ class AuthorizationTests(unittest.TestCase):
                 self.assertEqual("REQUIRE_GATE", self.decide("orchestrator", capability, resource).decision)
 
     def test_stale_gate_approval_does_not_authorize(self):
-        approval = gate_approval_from_persisted_decision(workflow_run_id="run-1", gate_id="gate-1", gate_type="release_approval", capability="vcs.merge", resources=["main"], evidence_hashes=["a" * 64], approver="human", approved_at="2026-01-01T00:00:00+00:00", policy_version="role-capability-policy/v1")
-        stale = GateApproval(**(approval.__dict__ | {"stale": True}))
+        stale = GateApproval("run-1", "gate-1", "release_approval", "vcs.merge", ("x",), ("y",), "human", "now", "role-capability-policy/v1", stale=True)
         result = self.decide("orchestrator", "vcs.merge", "main", approvals=[stale])
-        self.assertEqual(("REQUIRE_GATE", "GATE_APPROVAL_STALE_OR_INVALID"), (result.decision, result.reason_code))
+        self.assertEqual(("REQUIRE_GATE", "HUMAN_GATE_REQUIRED"), (result.decision, result.reason_code))
 
     def test_untrusted_approval_record_cannot_authorize(self):
         approval = GateApproval("run-1", "gate-1", "knowledge_publication_approval", "wiki.write", ("x",), ("y",), "human", "now", "role-capability-policy/v1")
         result = self.decide("knowledge_curator", "wiki.write", "github_wiki:Architecture", {"external_system_category": "github_wiki"}, [approval])
         self.assertEqual("REQUIRE_GATE", result.decision)
+
+    def test_only_genuine_persisted_current_approval_authorizes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteEventStore(Path(directory) / "runtime.db")
+            try:
+                engine = OrchestrationEngine(self.compiled, store, MockRoleExecutor())
+                run_id = engine.start({"id": "GATE-AUTH"})
+                evidence_row = store.connection.execute("SELECT artifact_id,content_hash FROM artifacts WHERE run_id=? AND artifact_type='work_item' AND active=1",(run_id,)).fetchone()
+                evidence = {"work_item": dict(evidence_row)}
+                resource = "github_wiki:Architecture"
+                resource_hash = hashlib.sha256(resource.encode()).hexdigest()
+                store.connection.execute("INSERT INTO gates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",("publish-1",run_id,"design_gate","knowledge_publication_approval","approved",json.dumps(evidence),"now","now","human","approved",engine.authorization.policy_version,json.dumps([resource_hash]),"wiki.write"))
+                store.connection.commit()
+                allowed = engine.authorization.decide(role_id="knowledge_curator",capability="wiki.write",resource=resource,task_context={"external_system_category":"github_wiki","workflow_run_id":run_id})
+                self.assertEqual("ALLOW", allowed.decision)
+                for changed in ({"task_context":{"external_system_category":"github_wiki","workflow_run_id":"other"}},{"capability":"vcs.merge"},{"resource":"github_wiki:Other"}):
+                    args={"role_id":"knowledge_curator","capability":"wiki.write","resource":resource,"task_context":{"external_system_category":"github_wiki","workflow_run_id":run_id}}
+                    args.update(changed)
+                    self.assertNotEqual("ALLOW", engine.authorization.decide(**args).decision)
+                engine.replace_artifact(run_id,"work_item",{"id":"changed"})
+                stale = engine.authorization.decide(role_id="knowledge_curator",capability="wiki.write",resource=resource,task_context={"external_system_category":"github_wiki","workflow_run_id":run_id})
+                self.assertEqual("REQUIRE_GATE", stale.decision)
+            finally:
+                store.close()
 
     def test_failure_triage_test_execution_requires_task_grant(self):
         denied = self.decide("failure_triage_analyst", "tests.run", "tests", {"command_category": "test"})
@@ -100,6 +127,42 @@ class AuthorizationTests(unittest.TestCase):
                 self.assertTrue(all(event["payload"]["decision"] == "ALLOW" for event in events))
             finally:
                 store.close()
+
+    def test_denied_and_gate_required_attempts_are_durable_and_terminal(self):
+        cases=(
+            ({"id":"design","type":"task","role_id":"architect","requires":[],"produces":[],"actions":[{"capability":"repo.write","resource":"orchestration/runtime.py"}]},"DENY","FAILED"),
+            ({"id":"design","type":"task","role_id":"orchestrator","requires":[],"produces":[],"actions":[{"capability":"vcs.merge","resource":"main"}]},"REQUIRE_GATE","BLOCKED"),
+        )
+        for node,decision,state in cases:
+            with self.subTest(decision=decision), tempfile.TemporaryDirectory() as directory:
+                store=SQLiteEventStore(Path(directory)/"runtime.db")
+                try:
+                    engine=OrchestrationEngine(self.compiled,store,MockRoleExecutor())
+                    run_id=str(uuid.uuid4()); now=datetime.now(timezone.utc).isoformat()
+                    store.connection.execute("INSERT INTO runs VALUES(?,?,?,?,?,?,?)",(run_id,"automate",self.compiled.snapshot_hash,"design","ROUTED",now,now)); store.connection.commit()
+                    with self.assertRaises(PermissionError): engine._execute_task(run_id,node)
+                    events=[event for event in store.events(run_id) if event["event_type"]=="authorization_decision"]
+                    self.assertTrue(any(event["payload"]["decision"]==decision for event in events))
+                    self.assertEqual(state,store.run(run_id)["state"])
+                finally: store.close()
+
+    def test_undeclared_artifact_read_and_write_are_denied(self):
+        nodes=(
+            {"id":"design","type":"task","role_id":"architect","requires":["work_item"],"produces":[],"actions":[]},
+            {"id":"design","type":"task","role_id":"architect","requires":[],"produces":["automation_design"],"actions":[]},
+        )
+        for node in nodes:
+            with self.subTest(node=node), tempfile.TemporaryDirectory() as directory:
+                store=SQLiteEventStore(Path(directory)/"runtime.db")
+                try:
+                    engine=OrchestrationEngine(self.compiled,store,MockRoleExecutor())
+                    run_id=str(uuid.uuid4()); now=datetime.now(timezone.utc).isoformat()
+                    store.connection.execute("INSERT INTO runs VALUES(?,?,?,?,?,?,?)",(run_id,"automate",self.compiled.snapshot_hash,"design","ROUTED",now,now))
+                    engine._artifact(run_id,"work_item","input",{"id":"IO"}); store.connection.commit()
+                    with self.assertRaisesRegex(PermissionError,"WORKFLOW_ACTION_UNDECLARED"): engine._execute_task(run_id,node)
+                    decisions=[e["payload"] for e in store.events(run_id) if e["event_type"]=="authorization_decision"]
+                    self.assertTrue(any(item["reason_code"]=="WORKFLOW_ACTION_UNDECLARED" for item in decisions))
+                finally: store.close()
 
 
 if __name__ == "__main__":

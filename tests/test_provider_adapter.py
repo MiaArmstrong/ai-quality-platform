@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -15,7 +16,7 @@ from orchestration.compiler import compile_system
 from orchestration.authorization import AuthorizationService
 from orchestration.context import ContextCompiler
 from orchestration.provider_executor import ProviderRoleExecutor, RoleDispatchExecutor
-from orchestration.providers.base import ExecutionRequest
+from orchestration.providers.base import ExecutionRequest, ExecutionResult, ExecutionTelemetry
 from orchestration.providers.openai import OpenAIProvider, OpenAIProviderConfig, OpenAIProviderRequestError, ProviderConfigurationError
 from orchestration.providers.openai_schema import OpenAISchemaCompatibilityError, make_openai_structured_output_schema, validate_openai_structured_output_schema
 from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
@@ -52,6 +53,13 @@ class DirectBadRequestError(Exception):
         self.status_code = 400
         self.body = {"type": "invalid_request_error", "code": "invalid_model", "param": "model", "message": "Model is unavailable"}
         self.request_id = "req_safe_456"
+
+
+class ServiceUnavailableError(Exception):
+    def __init__(self, api_key):
+        self.status_code = 503
+        self.body = {"error": {"type": "server_error", "code": "unavailable", "message": f"temporary failure for {api_key}"}}
+        self.request_id = "req_safe_503"
 
 
 def artifact_payload(escalate=False):
@@ -95,6 +103,17 @@ class ContextCompilerTests(unittest.TestCase):
         self.assertNotIn("implementer", request.role_instructions.lower())
         self.assertEqual(64, len(next(iter(request.source_hashes.values()))))
 
+    def test_instruction_change_after_compilation_is_rejected(self):
+        compiled = compile_system(ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = compiled.registry["agents"]["architect"]["role_file"]
+            target = root / relative
+            target.parent.mkdir(parents=True)
+            target.write_text("changed after compilation", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "compiled instruction source changed"):
+                ContextCompiler(root, compiled).compile(role_id="architect", task="design", workflow_context={}, inputs={"work_item": {}}, tier="high_reasoning", produces=["automation_design", "sources_of_record"], authorization_context={}, attempt=1)
+
     def test_openai_compatibility_validator_reproduces_legacy_envelope_failure(self):
         compiled = compile_system(ROOT)
         request = ContextCompiler(ROOT, compiled).compile(role_id="architect", task="design", workflow_context={}, inputs={"work_item": {}}, tier="high_reasoning", produces=["automation_design", "sources_of_record"], authorization_context={}, attempt=1)
@@ -137,6 +156,7 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual("json_schema", responses.calls[0]["text"]["format"]["type"])
         self.assertTrue(responses.calls[0]["text"]["format"]["strict"])
         self.assertNotIn("tools", responses.calls[0])
+        self.assertIs(False, responses.calls[0]["store"])
         self.assertNotIn("synthetic", json.dumps(responses.calls[0]))
         sent_schema = responses.calls[0]["text"]["format"]["schema"]
         validate_openai_structured_output_schema(sent_schema)
@@ -176,6 +196,16 @@ class OpenAIProviderTests(unittest.TestCase):
         error = raised.exception
         self.assertEqual(("invalid_request_error", "invalid_model", "model", "req_safe_456"), (error.error_type, error.code, error.param, error.request_id))
         self.assertIn("Model is unavailable", error.safe_message)
+
+    def test_non_400_provider_error_is_sanitized(self):
+        api_key = "sk-secret-value-12345678"
+        provider = OpenAIProvider(OpenAIProviderConfig(api_key, {"high_reasoning": "configured-model"}), SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: (_ for _ in ()).throw(ServiceUnavailableError(api_key)))))
+        with self.assertRaises(OpenAIProviderRequestError) as raised:
+            provider.execute(self.request())
+        error = raised.exception
+        self.assertEqual((503, "server_error", "unavailable"), (error.status, error.error_type, error.code))
+        self.assertNotIn(api_key, str(error))
+        self.assertIn("[REDACTED]", str(error))
 
     def test_provider_rejects_incompatible_schema_before_api_call(self):
         provider, responses = self.provider([json.dumps(artifact_payload())])
@@ -237,6 +267,16 @@ class ProviderRuntimeTests(unittest.TestCase):
             executor.execute(role_id="architect", task_id="design", tier="high_reasoning", inputs={"work_item": {}}, produces=["automation_design", "sources_of_record"], attempt=1, actions=[{"capability": "repo.write", "resource": "orchestration/runtime.py"}], task_context={}, gate_approvals=[])
         self.assertEqual([], responses.calls)
 
+    def test_provider_neutral_boundary_rejects_malicious_claim_of_validity(self):
+        class MaliciousProvider:
+            provider_id = "malicious"
+            def execute(self, request):
+                return ExecutionResult("success", "claimed_valid", {"automation_design":{"not_the_contract":True},"sources_of_record":{"also_wrong":True}}, ExecutionTelemetry("malicious","fake",1,1), validation_errors=())
+        executor = ProviderRoleExecutor(ContextCompiler(ROOT, self.compiled), MaliciousProvider(), AuthorizationService(self.compiled.registry,self.compiled.capabilities))
+        result = executor.execute(role_id="architect",task_id="design",tier="high_reasoning",inputs={"work_item":{}},produces=["automation_design","sources_of_record"],attempt=1,actions=[],task_context={},gate_approvals=[])
+        self.assertEqual(("failure","schema_validation_failed",{}),(result["outcome"],result["reason_code"],result["artifacts"]))
+        self.assertTrue(result["validation_errors"])
+
     def test_provider_artifacts_events_and_mock_regression(self):
         engine = self.engine([artifact_payload()])
         run_id = engine.start({"id": "REAL-1"})
@@ -244,6 +284,20 @@ class ProviderRuntimeTests(unittest.TestCase):
         provider_rows = self.store.connection.execute("SELECT model,input_tokens FROM provider_attempts WHERE run_id=?", (run_id,)).fetchall()
         self.assertEqual([("high", 11)], [tuple(row) for row in provider_rows])
         self.assertIn(("design_critique", 1), engine.executor.fallback.calls)
+
+    def test_provider_attempt_preflight_supports_pre_lifecycle_database(self):
+        legacy = Path(self.temp.name) / "legacy.db"
+        connection = sqlite3.connect(legacy)
+        connection.execute("CREATE TABLE provider_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, latency_ms INTEGER NOT NULL, estimated_cost REAL, response_id TEXT, raw_output TEXT, validation_errors_json TEXT NOT NULL, semantic_validation_status TEXT, semantic_rule_ids_json TEXT NOT NULL DEFAULT '[]', semantic_validation_json TEXT, repair_attempted INTEGER NOT NULL DEFAULT 0, repair_succeeded INTEGER NOT NULL DEFAULT 0, source_hashes_json TEXT NOT NULL, created_at TEXT NOT NULL)")
+        connection.commit(); connection.close()
+        migrated = SQLiteEventStore(legacy)
+        try:
+            provider = OpenAIProvider(OpenAIProviderConfig("synthetic", {"high_reasoning":"high"}), SimpleNamespace(responses=FakeResponses([json.dumps(artifact_payload())])))
+            engine = OrchestrationEngine(self.compiled,migrated,RoleDispatchExecutor(ProviderRoleExecutor(ContextCompiler(ROOT,self.compiled),provider),MockRoleExecutor(),{"architect"}))
+            run_id=engine.start({"id":"LEGACY-DB"})
+            row=migrated.connection.execute("SELECT status,latency_ms FROM provider_attempts WHERE run_id=?",(run_id,)).fetchone()
+            self.assertEqual("SUCCEEDED",row["status"]); self.assertGreaterEqual(row["latency_ms"],0)
+        finally: migrated.close()
 
     def test_smoke_requires_and_validates_both_architect_artifacts(self):
         engine = self.engine([artifact_payload()])
@@ -315,6 +369,13 @@ class ProviderRuntimeTests(unittest.TestCase):
         self.assertIn("architect_escalation_unavailable_tier/v1", json.loads(rows[0]["semantic_rule_ids_json"]))
         self.assertEqual("VALID", rows[1]["semantic_validation_status"])
 
+    def test_schema_valid_architect_failure_is_terminal_and_accepts_no_artifacts(self):
+        payload = artifact_payload(); payload.update(outcome="failure",reason_code="insufficient_context")
+        run_id = self.engine([payload]).start({"id":"ARCH-FAIL"})
+        self.assertEqual("FAILED", self.store.run(run_id)["state"])
+        count=self.store.connection.execute("SELECT COUNT(*) FROM artifacts WHERE run_id=? AND producer_node='design'",(run_id,)).fetchone()[0]
+        self.assertEqual(0,count)
+
     def test_low_confidence_escalation_creates_new_attempt(self):
         provider = OpenAIProvider(OpenAIProviderConfig("synthetic", {"high_reasoning": "high", "standard": "standard"}), SimpleNamespace(responses=FakeResponses([json.dumps(artifact_payload(escalate=True)), json.dumps(artifact_payload())])))
         selected = ProviderRoleExecutor(ContextCompiler(ROOT, self.compiled), provider)
@@ -324,11 +385,11 @@ class ProviderRuntimeTests(unittest.TestCase):
         engine._artifact(run_id, "work_item", "input", {"id": "ESC-1"})
         engine._set_state(run_id, "CONTEXT_READY")
         engine._set_state(run_id, "ROUTED")
-        engine._execute_task(run_id, {"id": "design", "type": "task", "role_id": "requirements_analyst", "requires": ["work_item"], "produces": ["automation_design", "sources_of_record"], "actions": []})
+        engine._execute_task(run_id, {"id": "design", "type": "task", "role_id": "requirements_analyst", "requires": ["work_item"], "produces": ["automation_design", "sources_of_record"], "actions": [{"capability":"artifacts.read","resource":"work_item"},{"capability":"artifacts.write","resource":"automation_design"},{"capability":"artifacts.write","resource":"sources_of_record"}]})
         attempts = self.store.connection.execute("SELECT attempt,tier,status FROM task_attempts WHERE run_id=? ORDER BY attempt", (run_id,)).fetchall()
         self.assertEqual([(1, "standard", "ESCALATED"), (2, "high_reasoning", "COMPLETED")], [tuple(row) for row in attempts])
         artifact_count = self.store.connection.execute("SELECT COUNT(*) FROM artifacts WHERE run_id=? AND artifact_type='automation_design'", (run_id,)).fetchone()[0]
-        self.assertEqual(2, artifact_count)
+        self.assertEqual(1, artifact_count)
 
 
 if __name__ == "__main__":

@@ -76,11 +76,10 @@ class OpenAIProvider:
                 instructions=instructions,
                 input=input_text,
                 text={"format": {"type": "json_schema", "name": "role_execution", "strict": True, "schema": provider_schema}},
+                store=False,
             )
         except Exception as exc:
-            if exc.__class__.__name__ != "BadRequestError" and getattr(exc, "status_code", None) != 400:
-                raise
-            raise self._safe_bad_request(exc) from None
+            raise self._safe_request_error(exc) from None
         latency_ms = round((time.perf_counter() - started) * 1000)
         raw = getattr(response, "output_text", None)
         usage = getattr(response, "usage", None)
@@ -104,6 +103,9 @@ class OpenAIProvider:
         return ExecutionResult(parsed["outcome"], parsed["reason_code"], parsed["artifacts"], telemetry, raw, getattr(response, "id", None))
 
     def _safe_bad_request(self, exc: Exception) -> OpenAIProviderRequestError:
+        return self._safe_request_error(exc)
+
+    def _safe_request_error(self, exc: Exception) -> OpenAIProviderRequestError:
         body = getattr(exc, "body", None)
         error = body.get("error", body) if isinstance(body, dict) else {}
         response = getattr(exc, "response", None)
@@ -120,7 +122,7 @@ class OpenAIProvider:
         message = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", message)
         message = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "[REDACTED]", message)[:1000]
         return OpenAIProviderRequestError(
-            status=getattr(exc, "status_code", 400),
+            status=getattr(exc, "status_code", None),
             error_type=error.get("type") or getattr(exc, "type", None),
             code=error.get("code") or getattr(exc, "code", None),
             param=error.get("param") or getattr(exc, "param", None),

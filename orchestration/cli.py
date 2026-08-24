@@ -28,6 +28,7 @@ def main() -> int:
     start.add_argument("--work-item", required=True)
     for name in ("inspect", "resume"):
         command = commands.add_parser(name); command.add_argument("run_id")
+    abandon = commands.add_parser("abandon-attempt"); abandon.add_argument("run_id"); abandon.add_argument("correlation_id"); abandon.add_argument("--by", required=True); abandon.add_argument("--reason", required=True)
     for name in ("approve", "reject"):
         command = commands.add_parser(name); command.add_argument("run_id"); command.add_argument("--by", required=True); command.add_argument("--reason", required=True)
     args = parser.parse_args(); root=args.root.resolve()
@@ -44,6 +45,8 @@ def main() -> int:
         if args.command=="start": result={"run_id":engine.start({"text":args.work_item})}
         elif args.command=="inspect": result=engine.inspect(args.run_id)
         elif args.command=="resume": result=engine.resume(args.run_id)
+        elif args.command=="abandon-attempt":
+            engine.abandon_provider_attempt(args.run_id,args.correlation_id,args.by,args.reason); result=engine.inspect(args.run_id)["run"]
         else:
             engine.decide_gate(args.run_id,"approved" if args.command=="approve" else "rejected",args.by,args.reason)
             result=engine.inspect(args.run_id)["run"]

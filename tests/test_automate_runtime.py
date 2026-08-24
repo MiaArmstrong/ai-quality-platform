@@ -77,6 +77,17 @@ class AutomateRuntimeTests(unittest.TestCase):
         statuses = [row[0] for row in self.store.connection.execute("SELECT status FROM gates WHERE run_id=? AND gate_type='design_approval'", (run_id,))]
         self.assertIn("stale", statuses)
 
+    def test_changed_pending_evidence_rejects_old_gate_and_requires_reissue(self):
+        run_id=self.start()
+        old_gate=self.store.connection.execute("SELECT gate_id FROM gates WHERE run_id=? AND status='pending'",(run_id,)).fetchone()[0]
+        self.engine.replace_artifact(run_id,"automation_design",{"material_change":True})
+        with self.assertRaisesRegex(ValueError,"no pending gate"):
+            self.engine.decide_gate(run_id,"approved","test-human","stale approval")
+        self.assertEqual("stale",self.store.connection.execute("SELECT status FROM gates WHERE gate_id=?",(old_gate,)).fetchone()[0])
+        self.engine.resume(run_id)
+        new_gate=self.store.connection.execute("SELECT gate_id FROM gates WHERE run_id=? AND status='pending'",(run_id,)).fetchone()[0]
+        self.assertNotEqual(old_gate,new_gate)
+
     def test_release_gate_blocks_and_rejection_uses_rework_state(self):
         run_id = self.start()
         self.approve(run_id)
@@ -112,6 +123,32 @@ class AutomateRuntimeTests(unittest.TestCase):
         attempts_after = self.store.connection.execute("SELECT COUNT(*) FROM task_attempts WHERE run_id=?", (run_id,)).fetchone()[0]
         self.assertEqual(attempts_before, attempts_after)
 
+    def test_unresolved_provider_attempt_blocks_resume_without_duplicate_request(self):
+        class CrashBoundaryExecutor:
+            def __init__(self, phase): self.phase=phase; self.calls=0; self.authorization=None
+            def attempt_descriptor(self, role_id, tier): return {"provider":"synthetic","model":"synthetic-model"}
+            def execute(self, **kwargs):
+                self.calls+=1
+                if self.phase=="after_response": self.response_observed=True
+                raise SystemExit(self.phase)
+        for phase in ("before_request","after_response"):
+            with self.subTest(phase=phase):
+                self.store.close(); self.temp.cleanup()
+                self.temp=tempfile.TemporaryDirectory(); self.db=Path(self.temp.name)/"runtime.db"
+                self.store=SQLiteEventStore(self.db); crashing=CrashBoundaryExecutor(phase)
+                self.engine=OrchestrationEngine(self.compiled,self.store,crashing)
+                with self.assertRaises(SystemExit): self.engine.start({"id":phase})
+                run_id=self.store.connection.execute("SELECT run_id FROM runs").fetchone()[0]
+                row=self.store.connection.execute("SELECT status,correlation_id FROM provider_attempts WHERE run_id=?",(run_id,)).fetchone()
+                self.assertEqual("IN_PROGRESS",row["status"]); self.assertTrue(row["correlation_id"])
+                self.store.close(); self.store=SQLiteEventStore(self.db)
+                replacement=CrashBoundaryExecutor("must_not_run"); self.engine=OrchestrationEngine(self.compiled,self.store,replacement)
+                result=self.engine.resume(run_id)
+                self.assertEqual("BLOCKED",result["state"]); self.assertEqual(0,replacement.calls)
+                self.engine.abandon_provider_attempt(run_id,row["correlation_id"],"test-human","cannot prove idempotent retry")
+                self.assertEqual("FAILED",self.store.run(run_id)["state"])
+                self.assertEqual("ABANDONED",self.store.connection.execute("SELECT status FROM provider_attempts WHERE correlation_id=?",(row["correlation_id"],)).fetchone()[0])
+
     def test_routing_events_are_recorded(self):
         run_id = self.start()
         rows = self.store.connection.execute("SELECT role_id,selected_tier FROM routing_events WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
@@ -126,6 +163,14 @@ class AutomateRuntimeTests(unittest.TestCase):
         self.assertEqual([(1, "ESCALATED", "standard"), (2, "COMPLETED", "high_reasoning")], [tuple(row) for row in attempts])
         transitions = [row[0] for row in self.store.connection.execute("SELECT transition FROM routing_events WHERE run_id=? AND task_id='implement' ORDER BY id", (run_id,))]
         self.assertEqual(["none", "escalate"], transitions)
+
+    def test_repeated_escalation_stops_at_highest_tier(self):
+        self.executor=MockRoleExecutor({"implement":["escalate","escalate","success"]})
+        self.engine=OrchestrationEngine(self.compiled,self.store,self.executor)
+        run_id=self.start(); self.approve(run_id)
+        self.assertEqual("INSUFFICIENT_EVIDENCE",self.store.run(run_id)["state"])
+        attempts=self.store.connection.execute("SELECT attempt,tier,status FROM task_attempts WHERE run_id=? AND node_id='implement' ORDER BY attempt",(run_id,)).fetchall()
+        self.assertEqual([(1,"standard","ESCALATED"),(2,"high_reasoning","INSUFFICIENT_EVIDENCE")],[tuple(row) for row in attempts])
 
 
 if __name__ == "__main__":

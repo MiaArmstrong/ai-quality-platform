@@ -12,11 +12,16 @@ filesystem mutation, Wiki writes, ticket writes, or deployment behavior.
 `ExecutionRequest` and `ExecutionResult` are vendor-neutral. The context compiler
 loads only the selected role, declared skills and standards, supplied artifacts,
 workflow/authorization context, and output contract. It records SHA-256 hashes
-for every contributing instruction file.
+for every contributing instruction file. Execution fails if a live instruction
+file no longer matches the compiled snapshot; a run never silently consumes a
+newer role, skill, or standard under an older snapshot hash.
 
 The OpenAI adapter uses the Responses API with strict JSON Schema output per the
 official [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs).
-The runtime validates output again, preserves malformed originals and errors,
+The provider-neutral executor validates the response envelope and every canonical
+artifact contract again without trusting adapter-reported validation results.
+Validation order is envelope, canonical artifact schemas, semantic rules, then
+artifact acceptance. It preserves malformed originals and errors,
 and permits one explicit repair attempt. An `escalate` result creates a new
 attempt only through a registry-approved tier transition.
 
@@ -38,8 +43,11 @@ Before any request, the adapter projects canonical contracts onto OpenAI's
 documented Structured Outputs subset and validates every nested object,
 required field, and keyword. Constraints not supported by the provider (such as
 `minLength`) remain in the canonical contract and are enforced after response;
-unsafe composition keywords fail locally. HTTP 400 diagnostics expose only
-status, error type/code, parameter, and a sanitized bounded message.
+unsafe composition keywords fail locally. The request explicitly sets
+`store=False`, which disables Responses application-state storage. This does not
+make claims beyond the provider's documented retention and abuse-monitoring
+controls. Provider errors expose only status, error type/code, parameter,
+request ID, and a sanitized bounded message.
 
 Model access grants no tool or action authority. The adapter exposes no tools;
 declared actions are independently checked by `AuthorizationService`. This is
@@ -80,12 +88,22 @@ python -m orchestration --db runtime.db inspect <run-id>
 python -m orchestration --db runtime.db approve <run-id> --by <person> --reason <reason>
 python -m orchestration --db runtime.db reject <run-id> --by <person> --reason <reason>
 python -m orchestration --db runtime.db resume <run-id>
+python -m orchestration --db runtime.db abandon-attempt <run-id> <correlation-id> --by <person> --reason <reason>
 ```
 
 Gate decisions and resumes are separate commands so approval never implicitly
 executes downstream work. SQLite holds runtime metadata and an append-only event
-ledger. Artifact payloads are canonical JSON in SQLite for this slice; the
-schema leaves room for future file-backed large artifacts.
+ledger. Tables such as `provider_attempts` are mutable projections of current
+attempt state, while lifecycle events are the historical record. Artifact
+payloads and raw provider evidence are local canonical JSON in SQLite for this
+slice; default CLI and smoke inspection omit raw provider output. The schema
+leaves room for future file-backed large artifacts.
+
+The current runtime is deliberately single-runner and non-concurrent. It does
+not provide leases or concurrent resume safety. An unresolved `IN_PROGRESS`
+network attempt blocks automatic resume and requires explicit recovery so a
+paid request is not silently duplicated. The only v1 recovery operation marks
+that attempt abandoned and the run failed; it never retries the request.
 
 ## Demonstration
 
@@ -99,9 +117,14 @@ reaching `COMPLETED`.
 ## Authorization decisions
 
 `authorization.py` evaluates role, capability, resource, task scope, and current
-gate approvals. It returns `ALLOW`, `DENY`, or `REQUIRE_GATE` without performing
+gate approvals loaded from SQLite runtime state. Callers cannot manufacture a
+trusted approval. Gate provenance includes gate/run/type, policy version,
+capability, resource hash, current evidence hashes, and non-stale approved
+status. It returns `ALLOW`, `DENY`, or `REQUIRE_GATE` without performing
 the requested action. The mock executor checks every action declared by a
-workflow task, and the workflow event ledger records each decision.
+workflow task. Required artifact reads and produced artifact writes are
+independently authorized at the runtime boundary, and every decision is durably
+recorded before a denial or gate requirement aborts execution.
 
 Repository writes can be limited to task-authorized path prefixes; command
 execution is limited by command category; and Wiki/external operations can be

@@ -30,7 +30,6 @@ class GateApproval:
     policy_version: str
     status: str = "approved"
     stale: bool = False
-    trusted: bool = False
 
 @dataclass(frozen=True)
 class AuthorizationDecision:
@@ -52,10 +51,11 @@ class AuthorizationDecision:
 class AuthorizationService:
     """Evaluates policy only; it never performs the requested action."""
 
-    def __init__(self, registry: Mapping[str, Any], capabilities: Mapping[str, Any], audit_sink: Callable[[AuthorizationDecision], None] | None = None):
+    def __init__(self, registry: Mapping[str, Any], capabilities: Mapping[str, Any], audit_sink: Callable[[AuthorizationDecision], None] | None = None, approval_resolver: Callable[..., Iterable[GateApproval]] | None = None):
         self.registry = registry
         self.capabilities = capabilities
         self.audit_sink = audit_sink
+        self.approval_resolver = approval_resolver
         self.audit_log: list[AuthorizationDecision] = []
         self.policy_version = registry["authorization_policy_version"]
 
@@ -129,8 +129,9 @@ class AuthorizationService:
         if capability in gated:
             gate_type = gated[capability]
             run_id = context.get("workflow_run_id")
-            matching = [approval for approval in gate_approvals if approval.gate_type == gate_type and approval.capability == capability and _resource_hash(resource) in approval.approved_resource_hashes]
-            valid = [approval for approval in matching if approval.trusted and approval.status == "approved" and not approval.stale and approval.policy_version == self.policy_version and (run_id is None or approval.workflow_run_id == run_id)]
+            resolved = list(self.approval_resolver(workflow_run_id=run_id, gate_type=gate_type, capability=capability, resource=resource) if self.approval_resolver and run_id else ())
+            matching = [approval for approval in resolved if approval.gate_type == gate_type and approval.capability == capability and _resource_hash(resource) in approval.approved_resource_hashes]
+            valid = [approval for approval in matching if approval.status == "approved" and not approval.stale and approval.policy_version == self.policy_version and approval.workflow_run_id == run_id]
             if valid:
                 return self._emit(role_id, capability, resource, "ALLOW", "VALID_GATE_APPROVAL", gate_type)
             reason = "GATE_APPROVAL_STALE_OR_INVALID" if matching else "HUMAN_GATE_REQUIRED"

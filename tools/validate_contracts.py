@@ -304,6 +304,14 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
                 category = action.get("command_category")
                 if category is not None and category not in command_categories:
                     errors.append(f"workflow {workflow_id}: node {node.get('id')} references unknown command category {category}")
+            if node.get("type") == "task" and "actions" in node:
+                declared = {(item.get("capability"), item.get("resource")) for item in node.get("actions", [])}
+                for artifact_type in node.get("requires", []):
+                    if ("artifacts.read", artifact_type) not in declared:
+                        errors.append(f"workflow {workflow_id}: node {node.get('id')} lacks artifacts.read for required artifact {artifact_type}")
+                for artifact_type in node.get("produces", []):
+                    if ("artifacts.write", artifact_type) not in declared:
+                        errors.append(f"workflow {workflow_id}: node {node.get('id')} lacks artifacts.write for produced artifact {artifact_type}")
         for required_gate in workflow.get("required_gates", []):
             if required_gate not in present_gates:
                 errors.append(f"workflow {workflow_id}: required gate is missing: {required_gate}")
@@ -312,6 +320,13 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
                 errors.append(f"workflow {workflow_id}: transition references unknown node: {transition}")
             if transition.get("on") == "bypass" and transition.get("bypass_reason_required") is not True:
                 errors.append(f"workflow {workflow_id}: gate bypass must require an audit reason")
+        transition_keys = [(item.get("from"), item.get("on")) for item in workflow.get("transitions", [])]
+        duplicate_transitions = sorted({item for item in transition_keys if transition_keys.count(item) > 1})
+        if duplicate_transitions:
+            errors.append(f"workflow {workflow_id}: duplicate outcome transitions: {duplicate_transitions}")
+        for node in nodes:
+            if node.get("type") == "task" and not any(item.get("from") == node.get("id") and item.get("on") == "success" for item in workflow.get("transitions", [])):
+                errors.append(f"workflow {workflow_id}: task {node.get('id')} lacks a success transition; failure is globally terminal")
 
     expected = set(EXPECTED_VERDICTS)
     for relative in [

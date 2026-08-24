@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from .authorization import AuthorizationService, GateApproval
 from .compiler import CompiledSystem
 from .context import ContextCompiler
@@ -39,8 +41,26 @@ class ProviderRoleExecutor:
             attempt=attempt, repair_context=task_context.get("repair_context"),
         )
         result = self.provider.execute(request)
+        envelope = {
+            "outcome": result.outcome,
+            "reason_code": result.reason_code,
+            "artifacts": dict(result.artifacts),
+        }
+        canonical_errors = self._canonical_validation_errors(request.output_contract, envelope)
+        if canonical_errors:
+            return {
+                "outcome": "failure",
+                "reason_code": "schema_validation_failed",
+                "artifacts": {},
+                "raw_output": result.raw_output,
+                "provider_response_id": result.provider_response_id,
+                "validation_errors": list(canonical_errors),
+                "semantic_validation": None,
+                "source_hashes": dict(request.source_hashes),
+                "telemetry": result.telemetry.__dict__,
+            }
         semantic_validation = None
-        if not result.validation_errors:
+        if not canonical_errors:
             role = self.compiler.compiled.registry["agents"][role_id]
             semantic_validation = self.semantic_validator.validate(
                 role_id=role_id,
@@ -64,11 +84,42 @@ class ProviderRoleExecutor:
             "outcome": result.outcome, "reason_code": result.reason_code,
             "artifacts": dict(result.artifacts), "raw_output": result.raw_output,
             "provider_response_id": result.provider_response_id,
-            "validation_errors": list(result.validation_errors),
+            "validation_errors": list(canonical_errors),
             "semantic_validation": semantic_validation.as_dict() if semantic_validation else None,
             "source_hashes": dict(request.source_hashes),
             "telemetry": result.telemetry.__dict__,
         }
+
+    def attempt_descriptor(self, role_id: str, tier: str) -> dict[str, str]:
+        provider = getattr(self.provider, "provider_id", self.provider.__class__.__name__.lower())
+        config = getattr(self.provider, "config", None)
+        model = config.resolve_model(tier) if config is not None and hasattr(config, "resolve_model") else tier
+        return {"provider": provider, "model": model}
+
+    @staticmethod
+    def _canonical_validation_errors(contract: Any, envelope: dict[str, Any]) -> tuple[str, ...]:
+        envelope_schema = {
+            "type": "object",
+            "required": ["outcome", "reason_code", "artifacts"],
+            "properties": {
+                "outcome": contract["properties"]["outcome"],
+                "reason_code": contract["properties"]["reason_code"],
+                "artifacts": {"type": "object"},
+            },
+            "additionalProperties": False,
+        }
+        envelope_errors = tuple(f"envelope: {error.message}" for error in Draft202012Validator(envelope_schema).iter_errors(envelope))
+        if envelope_errors:
+            return envelope_errors
+        artifact_schema = contract["properties"]["artifacts"]
+        artifacts = envelope["artifacts"]
+        expected = set(artifact_schema["required"])
+        actual = set(artifacts)
+        errors = [f"artifacts: missing required artifact {name}" for name in sorted(expected - actual)]
+        errors.extend(f"artifacts: undeclared artifact {name}" for name in sorted(actual - set(artifact_schema["properties"])))
+        for artifact_type in sorted(actual & set(artifact_schema["properties"])):
+            errors.extend(f"{artifact_type}: {error.message}" for error in Draft202012Validator(artifact_schema["properties"][artifact_type]).iter_errors(artifacts[artifact_type]))
+        return tuple(errors)
 
 
 class RoleDispatchExecutor:
@@ -92,3 +143,8 @@ class RoleDispatchExecutor:
     def execute(self, **kwargs: Any) -> dict[str, Any]:
         target = self.provider_executor if kwargs["role_id"] in self.provider_roles else self.fallback
         return target.execute(**kwargs)
+
+    def attempt_descriptor(self, role_id: str, tier: str) -> dict[str, str] | None:
+        if role_id not in self.provider_roles:
+            return None
+        return self.provider_executor.attempt_descriptor(role_id, tier)
