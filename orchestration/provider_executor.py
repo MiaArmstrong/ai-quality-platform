@@ -19,8 +19,9 @@ class ProviderRoleExecutor:
         self.provider = provider
         self.authorization = authorization
         self.semantic_validator = semantic_validator or SemanticOutputValidator()
+        self._prepared_requests: dict[tuple[str, str, int], Any] = {}
 
-    def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, actions: list[dict[str, Any]], task_context: dict[str, Any], gate_approvals: list[GateApproval]) -> dict[str, Any]:
+    def prepare_request(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, actions: list[dict[str, Any]], task_context: dict[str, Any], gate_approvals: list[GateApproval]) -> dict[str, Any]:
         if self.authorization is None:
             raise RuntimeError("provider executor requires an authorization service")
         decisions = []
@@ -34,12 +35,22 @@ class ProviderRoleExecutor:
             if decision.decision != "ALLOW":
                 raise PermissionError(f"authorization {decision.decision}: {decision.reason_code}")
         request = self.compiler.compile(
-            role_id=role_id, task=task_id,
-            workflow_context=task_context.get("workflow_context", {}), inputs=inputs,
-            tier=tier, produces=produces,
-            authorization_context={"decisions": decisions, "actions_permitted": False},
+            role_id=role_id, task=task_id, workflow_context=task_context.get("workflow_context", {}), inputs=inputs,
+            tier=tier, produces=produces, authorization_context={"decisions": decisions, "actions_permitted": False},
             attempt=attempt, repair_context=task_context.get("repair_context"),
         )
+        validator = getattr(self.provider, "validate_request_budget", None)
+        estimated_input_tokens = validator(request) if validator else None
+        self._prepared_requests[(role_id, task_id, attempt)] = request
+        return {"estimated_input_tokens": estimated_input_tokens}
+
+    def execute(self, *, role_id: str, task_id: str, tier: str, inputs: dict[str, Any], produces: list[str], attempt: int, actions: list[dict[str, Any]], task_context: dict[str, Any], gate_approvals: list[GateApproval]) -> dict[str, Any]:
+        if self.authorization is None:
+            raise RuntimeError("provider executor requires an authorization service")
+        key = (role_id, task_id, attempt)
+        if key not in self._prepared_requests:
+            self.prepare_request(role_id=role_id, task_id=task_id, tier=tier, inputs=inputs, produces=produces, attempt=attempt, actions=actions, task_context=task_context, gate_approvals=gate_approvals)
+        request = self._prepared_requests.pop(key)
         result = self.provider.execute(request)
         envelope = {
             "outcome": result.outcome,
@@ -94,7 +105,12 @@ class ProviderRoleExecutor:
         provider = getattr(self.provider, "provider_id", self.provider.__class__.__name__.lower())
         config = getattr(self.provider, "config", None)
         model = config.resolve_model(tier) if config is not None and hasattr(config, "resolve_model") else tier
-        return {"provider": provider, "model": model}
+        return {
+            "provider": provider,
+            "model": model,
+            "max_output_tokens": getattr(config, "max_output_tokens", None),
+            "max_input_tokens": getattr(config, "max_input_tokens", None),
+        }
 
     @staticmethod
     def _canonical_validation_errors(contract: Any, envelope: dict[str, Any]) -> tuple[str, ...]:
@@ -143,6 +159,11 @@ class RoleDispatchExecutor:
     def execute(self, **kwargs: Any) -> dict[str, Any]:
         target = self.provider_executor if kwargs["role_id"] in self.provider_roles else self.fallback
         return target.execute(**kwargs)
+
+    def prepare_request(self, **kwargs: Any) -> dict[str, Any] | None:
+        if kwargs["role_id"] in self.provider_roles:
+            return self.provider_executor.prepare_request(**kwargs)
+        return None
 
     def attempt_descriptor(self, role_id: str, tier: str) -> dict[str, str] | None:
         if role_id not in self.provider_roles:

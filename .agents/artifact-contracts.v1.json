@@ -12,6 +12,64 @@
       },
       "additionalProperties": false
     },
+    "requirements_readiness": {
+      "type": "object",
+      "required": ["verdict", "summary", "readiness_checks", "definition_of_done", "missing_information", "conflicts", "blocking_conditions", "candidate_tests", "risks_notes"],
+      "properties": {
+        "verdict": {"type": "string", "enum": ["READY", "NEEDS_INFO", "BLOCKED"]},
+        "summary": {"type": "string", "minLength": 1},
+        "readiness_checks": {"type": "array", "items": {"type": "object", "required": ["check_id", "status", "evidence", "notes"], "properties": {"check_id": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN", "NOT_APPLICABLE"]}, "evidence": {"type": "array", "items": {"type": "string"}}, "notes": {"type": "string"}}, "additionalProperties": false}},
+        "definition_of_done": {"type": "array", "items": {"type": "string"}},
+        "missing_information": {"type": "array", "items": {"type": "object", "required": ["gap_id", "description", "blocks_readiness"], "properties": {"gap_id": {"type": "string"}, "description": {"type": "string"}, "blocks_readiness": {"type": "boolean"}}, "additionalProperties": false}},
+        "conflicts": {"type": "array", "items": {"type": "object", "required": ["conflict_id", "description", "sources", "blocks_readiness"], "properties": {"conflict_id": {"type": "string"}, "description": {"type": "string"}, "sources": {"type": "array", "items": {"type": "string"}}, "blocks_readiness": {"type": "boolean"}}, "additionalProperties": false}},
+        "blocking_conditions": {"type": "array", "items": {"type": "object", "required": ["condition_id", "description", "dependency"], "properties": {"condition_id": {"type": "string"}, "description": {"type": "string"}, "dependency": {"type": "string"}}, "additionalProperties": false}},
+        "candidate_tests": {"type": "array", "items": {"type": "object", "required": ["test_id", "description", "expected_result"], "properties": {"test_id": {"type": "string"}, "description": {"type": "string"}, "expected_result": {"type": "string"}}, "additionalProperties": false}},
+        "risks_notes": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "qa_intake": {
+      "type": "object",
+      "required": ["summary", "classification", "test_plan", "risks", "sources_used"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "classification": {"type": "string", "enum": ["READY_FOR_QA", "NEEDS_CLARIFICATION"]},
+        "test_plan": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["test_id", "description", "expected_result"], "properties": {"test_id": {"type": "string"}, "description": {"type": "string"}, "expected_result": {"type": "string"}}, "additionalProperties": false}},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "sources_used": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "verifier_result": {
+      "type": "object",
+      "required": ["verdict", "summary", "challenged_claims", "evidence", "concerns", "unsupported_assumptions", "evidence_gaps", "recommended_next_action"],
+      "properties": {
+        "verdict": {"type": "string", "enum": ["SUPPORTED", "SUPPORTED_WITH_CONCERNS", "REFUTED", "INSUFFICIENT_EVIDENCE"]},
+        "summary": {"type": "string", "minLength": 1},
+        "challenged_claims": {"type": "array", "items": {"type": "object", "required": ["claim", "assessment", "evidence_refs"], "properties": {"claim": {"type": "string"}, "assessment": {"type": "string", "enum": ["SUPPORTED", "CONCERN", "REFUTED", "INSUFFICIENT_EVIDENCE"]}, "evidence_refs": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false}},
+        "evidence": {"type": "array", "items": {"type": "object", "required": ["source", "observation"], "properties": {"source": {"type": "string"}, "observation": {"type": "string"}}, "additionalProperties": false}},
+        "concerns": {"type": "array", "items": {"type": "object", "required": ["description", "critical"], "properties": {"description": {"type": "string"}, "critical": {"type": "boolean"}}, "additionalProperties": false}},
+        "unsupported_assumptions": {"type": "array", "items": {"type": "string"}},
+        "evidence_gaps": {"type": "array", "items": {"type": "string"}},
+        "recommended_next_action": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "adversarial_review": {
+      "type": "object",
+      "required": ["verdict", "summary", "challenged_claims", "evidence", "concerns", "unsupported_assumptions", "evidence_gaps", "recommended_next_action"],
+      "properties": {
+        "verdict": {"type": "string", "enum": ["SUPPORTED", "SUPPORTED_WITH_CONCERNS", "REFUTED", "INSUFFICIENT_EVIDENCE"]},
+        "summary": {"type": "string", "minLength": 1},
+        "challenged_claims": {"type": "array", "items": {"type": "object", "required": ["claim", "assessment", "evidence_refs"], "properties": {"claim": {"type": "string"}, "assessment": {"type": "string", "enum": ["SUPPORTED", "CONCERN", "REFUTED", "INSUFFICIENT_EVIDENCE"]}, "evidence_refs": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false}},
+        "evidence": {"type": "array", "items": {"type": "object", "required": ["source", "observation"], "properties": {"source": {"type": "string"}, "observation": {"type": "string"}}, "additionalProperties": false}},
+        "concerns": {"type": "array", "items": {"type": "object", "required": ["description", "critical"], "properties": {"description": {"type": "string"}, "critical": {"type": "boolean"}}, "additionalProperties": false}},
+        "unsupported_assumptions": {"type": "array", "items": {"type": "string"}},
+        "evidence_gaps": {"type": "array", "items": {"type": "string"}},
+        "recommended_next_action": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
     "sources_of_record": {
       "type": "object",
       "required": ["sources"],

@@ -16,7 +16,7 @@ from orchestration.compiler import compile_system
 from orchestration.authorization import AuthorizationService
 from orchestration.context import ContextCompiler
 from orchestration.provider_executor import ProviderRoleExecutor, RoleDispatchExecutor
-from orchestration.providers.base import ExecutionRequest, ExecutionResult, ExecutionTelemetry
+from orchestration.providers.base import ExecutionRequest, ExecutionResult, ExecutionTelemetry, ProviderInputBudgetError
 from orchestration.providers.openai import OpenAIProvider, OpenAIProviderConfig, OpenAIProviderRequestError, ProviderConfigurationError
 from orchestration.providers.openai_schema import OpenAISchemaCompatibilityError, make_openai_structured_output_schema, validate_openai_structured_output_schema
 from orchestration.runtime import MockRoleExecutor, OrchestrationEngine, SQLiteEventStore
@@ -37,7 +37,7 @@ class FakeResponses:
         raw = self.outputs.pop(0)
         return SimpleNamespace(
             id=f"resp-{len(self.calls)}", model=kwargs["model"], output_text=raw,
-            usage=SimpleNamespace(input_tokens=11, output_tokens=7, input_tokens_details=SimpleNamespace(cached_tokens=3)),
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7, input_tokens_details=SimpleNamespace(cached_tokens=3, cache_write_tokens=0)),
         )
 
 
@@ -53,6 +53,18 @@ class DirectBadRequestError(Exception):
         self.status_code = 400
         self.body = {"type": "invalid_request_error", "code": "invalid_model", "param": "model", "message": "Model is unavailable"}
         self.request_id = "req_safe_456"
+
+
+class FixedInputEstimator:
+    counting_method = "fixed_test_estimator"
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.seen = []
+
+    def estimate(self, **kwargs):
+        self.seen.append(kwargs)
+        return self.tokens
 
 
 class ServiceUnavailableError(Exception):
@@ -216,6 +228,27 @@ class OpenAIProviderTests(unittest.TestCase):
             provider.execute(replace(request, output_contract=incompatible))
         self.assertEqual([], responses.calls)
 
+    def test_output_limit_reaches_request_and_below_budget_input_is_unchanged(self):
+        responses = FakeResponses([json.dumps(artifact_payload())])
+        estimator = FixedInputEstimator(31999)
+        config = OpenAIProviderConfig("synthetic", {"high_reasoning": "configured-model"}, max_output_tokens=4096, max_input_tokens=32000)
+        provider = OpenAIProvider(config, SimpleNamespace(responses=responses), estimator)
+        request = self.request()
+        expected_input = ContextCompiler.render(request)[1]
+        result = provider.execute(request)
+        self.assertEqual("success", result.outcome)
+        self.assertEqual(4096, responses.calls[0]["max_output_tokens"])
+        self.assertEqual(expected_input, responses.calls[0]["input"])
+        self.assertEqual((32000, 31999, 4096), (result.telemetry.max_input_tokens, result.telemetry.estimated_input_tokens, result.telemetry.max_output_tokens))
+
+    def test_above_budget_input_is_rejected_before_provider_dispatch(self):
+        responses = FakeResponses([json.dumps(artifact_payload())])
+        provider = OpenAIProvider(OpenAIProviderConfig("synthetic", {"high_reasoning": "configured-model"}, max_output_tokens=4096, max_input_tokens=32000), SimpleNamespace(responses=responses), FixedInputEstimator(32001))
+        with self.assertRaises(ProviderInputBudgetError) as raised:
+            provider.execute(self.request())
+        self.assertEqual((32001, 32000), (raised.exception.estimated_input_tokens, raised.exception.max_input_tokens))
+        self.assertEqual([], responses.calls)
+
 
 class SemanticOutputValidationTests(unittest.TestCase):
     def test_exact_smoke_inconsistency_is_schema_valid_but_semantically_invalid(self):
@@ -284,6 +317,17 @@ class ProviderRuntimeTests(unittest.TestCase):
         provider_rows = self.store.connection.execute("SELECT model,input_tokens FROM provider_attempts WHERE run_id=?", (run_id,)).fetchall()
         self.assertEqual([("high", 11)], [tuple(row) for row in provider_rows])
         self.assertIn(("design_critique", 1), engine.executor.fallback.calls)
+
+    def test_budget_rejection_is_local_auditable_and_not_a_provider_attempt(self):
+        responses = FakeResponses([json.dumps(artifact_payload())])
+        provider = OpenAIProvider(OpenAIProviderConfig("synthetic", {"high_reasoning": "high"}, max_output_tokens=4096, max_input_tokens=32000), SimpleNamespace(responses=responses), FixedInputEstimator(32001))
+        engine = OrchestrationEngine(self.compiled, self.store, RoleDispatchExecutor(ProviderRoleExecutor(ContextCompiler(ROOT, self.compiled), provider), MockRoleExecutor(), {"architect"}))
+        run_id = engine.start({"id": "OVER-BUDGET", "payload": "preserved-not-truncated"})
+        self.assertEqual("FAILED", self.store.run(run_id)["state"])
+        self.assertEqual([], responses.calls)
+        self.assertEqual(0, self.store.connection.execute("SELECT COUNT(*) FROM provider_attempts WHERE run_id=?", (run_id,)).fetchone()[0])
+        event = next(item for item in self.store.events(run_id) if item["event_type"] == "provider_input_budget_rejected")
+        self.assertEqual((32001, 32000, "fixed_test_estimator"), (event["payload"]["estimated_input_tokens"], event["payload"]["max_input_tokens"], event["payload"]["counting_method"]))
 
     def test_provider_attempt_preflight_supports_pre_lifecycle_database(self):
         legacy = Path(self.temp.name) / "legacy.db"

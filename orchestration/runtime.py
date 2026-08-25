@@ -9,8 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from jsonschema import Draft202012Validator
+
 from .compiler import CompiledSystem
 from .authorization import AuthorizationService, GateApproval, _resource_hash
+from .providers.base import ProviderInputBudgetError
 
 
 RUNTIME_STATES = {
@@ -99,7 +102,7 @@ class SQLiteEventStore:
         CREATE TABLE IF NOT EXISTS task_attempts(run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, role_id TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL, outcome TEXT, started_at TEXT NOT NULL, finished_at TEXT, PRIMARY KEY(run_id,node_id,attempt));
         CREATE TABLE IF NOT EXISTS routing_events(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, workflow_id TEXT NOT NULL, task_id TEXT NOT NULL, role_id TEXT NOT NULL, requested_tier TEXT NOT NULL, selected_tier TEXT NOT NULL, reason_code TEXT NOT NULL, transition TEXT NOT NULL, attempt INTEGER NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS gates(gate_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL, gate_type TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL, requested_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT, reason TEXT, policy_version TEXT, approved_resource_hashes_json TEXT, capability TEXT);
-        CREATE TABLE IF NOT EXISTS provider_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'IN_PROGRESS', input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, latency_ms INTEGER, estimated_cost REAL, response_id TEXT, raw_output TEXT, validation_errors_json TEXT NOT NULL DEFAULT '[]', semantic_validation_status TEXT, semantic_rule_ids_json TEXT NOT NULL DEFAULT '[]', semantic_validation_json TEXT, repair_attempted INTEGER NOT NULL DEFAULT 0, repair_succeeded INTEGER NOT NULL DEFAULT 0, source_hashes_json TEXT NOT NULL DEFAULT '{}', safe_error_json TEXT, created_at TEXT NOT NULL, finished_at TEXT);
+        CREATE TABLE IF NOT EXISTS provider_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT UNIQUE, run_id TEXT NOT NULL, workflow_id TEXT, node_id TEXT NOT NULL, role_id TEXT, tier TEXT, routing_transition TEXT, routing_reason TEXT, attempt INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'IN_PROGRESS', final_task_outcome TEXT, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, cache_write_tokens INTEGER, max_output_tokens INTEGER, max_input_tokens INTEGER, estimated_input_tokens INTEGER, latency_ms INTEGER, estimated_cost REAL, response_id TEXT, raw_output TEXT, validation_errors_json TEXT NOT NULL DEFAULT '[]', semantic_validation_status TEXT, semantic_rule_ids_json TEXT NOT NULL DEFAULT '[]', semantic_validation_json TEXT, repair_attempted INTEGER NOT NULL DEFAULT 0, repair_succeeded INTEGER NOT NULL DEFAULT 0, source_hashes_json TEXT NOT NULL DEFAULT '{}', safe_error_json TEXT, created_at TEXT NOT NULL, finished_at TEXT);
         CREATE TABLE IF NOT EXISTS findings(finding_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
         """)
         gate_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(gates)")}
@@ -120,6 +123,16 @@ class SQLiteEventStore:
             "status": "TEXT NOT NULL DEFAULT 'SUCCEEDED'",
             "safe_error_json": "TEXT",
             "finished_at": "TEXT",
+            "workflow_id": "TEXT",
+            "role_id": "TEXT",
+            "tier": "TEXT",
+            "routing_transition": "TEXT",
+            "routing_reason": "TEXT",
+            "final_task_outcome": "TEXT",
+            "cache_write_tokens": "INTEGER",
+            "max_output_tokens": "INTEGER",
+            "max_input_tokens": "INTEGER",
+            "estimated_input_tokens": "INTEGER",
         }.items():
             if name not in provider_columns:
                 self.connection.execute(f"ALTER TABLE provider_attempts ADD COLUMN {name} {declaration}")
@@ -141,10 +154,17 @@ class SQLiteEventStore:
 
 
 class OrchestrationEngine:
-    def __init__(self, compiled: CompiledSystem, store: SQLiteEventStore, executor: RoleExecutor):
+    MAX_REPAIR_ATTEMPTS = 1
+    MAX_ESCALATIONS = 1
+
+    def __init__(self, compiled: CompiledSystem, store: SQLiteEventStore, executor: RoleExecutor, workflow_id: str = "automate"):
         self.compiled, self.store, self.executor = compiled, store, executor
-        self.workflow = compiled.workflows["automate"]
+        if workflow_id not in compiled.workflows:
+            raise ValueError(f"unknown workflow: {workflow_id}")
+        self.workflow_id = workflow_id
+        self.workflow = compiled.workflows[workflow_id]
         self.nodes = {node["id"]: node for node in self.workflow["nodes"]}
+        self._route_details: dict[tuple[str, int], tuple[str, str]] = {}
         self.authorization = AuthorizationService(compiled.registry, compiled.capabilities, approval_resolver=self._resolve_gate_approvals)
         if hasattr(executor, "authorization"):
             executor.authorization = self.authorization
@@ -240,7 +260,7 @@ class OrchestrationEngine:
 
     def start(self, work_item: Any) -> str:
         run_id=str(uuid.uuid4()); now=utcnow()
-        self.store.connection.execute("INSERT INTO runs VALUES(?,?,?,?,?,?,?)",(run_id,"automate",self.compiled.snapshot_hash,self.workflow["initial_node"],"CREATED",now,now))
+        self.store.connection.execute("INSERT INTO runs VALUES(?,?,?,?,?,?,?)",(run_id,self.workflow_id,self.compiled.snapshot_hash,self.workflow["initial_node"],"CREATED",now,now))
         self.store.event(run_id,"run_created",self.workflow["initial_node"],snapshot_hash=self.compiled.snapshot_hash)
         self._artifact(run_id,"work_item","input",work_item); self._set_state(run_id,"CONTEXT_READY"); self.store.connection.commit()
         self.resume(run_id); return run_id
@@ -258,14 +278,27 @@ class OrchestrationEngine:
         undeclared = set(artifacts) - set(node["produces"])
         if undeclared:
             raise ValueError(f"provider returned undeclared artifacts: {sorted(undeclared)}")
+        missing = set(node["produces"]) - set(artifacts)
+        if missing:
+            raise ValueError(f"executor omitted required artifacts: {sorted(missing)}")
         for artifact_type, content in artifacts.items():
+            # The legacy automate mocks predate canonical artifact contracts. The
+            # new executable slice has no such exception: provider and local
+            # artifacts cross the same canonical acceptance boundary.
+            contract = self.compiled.artifact_contracts.get(artifact_type) if self.workflow_id == "qa-provider-demo" else None
+            if contract is not None:
+                errors = [error.message for error in Draft202012Validator(contract).iter_errors(content)]
+                if errors:
+                    self.store.event(run_id, "artifact_contract_validation_failed", node["id"], node["id"], artifact_type=artifact_type, errors=errors)
+                    raise ValueError(f"artifact {artifact_type} failed canonical validation: {errors}")
             self._authorize(run_id, node, "artifacts.write", artifact_type, context)
             self._artifact(run_id, artifact_type, node["id"], content)
 
     def _route(self, run_id: str, node: dict[str, Any], attempt: int, requested: str | None = None, reason: str="role_default") -> str:
         role=self.compiled.registry["agents"][node["role_id"]]; default=role["default_tier"]; selected=requested or default
         transition="none" if selected==default else ("escalate" if self.compiled.registry["enums"]["tiers"].index(selected)>self.compiled.registry["enums"]["tiers"].index(default) else "deescalate")
-        self.store.connection.execute("INSERT INTO routing_events(run_id,workflow_id,task_id,role_id,requested_tier,selected_tier,reason_code,transition,attempt,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(run_id,"automate",node["id"],node["role_id"],default,selected,reason,transition,attempt,utcnow()))
+        self._route_details[(node["id"], attempt)] = (transition, reason)
+        self.store.connection.execute("INSERT INTO routing_events(run_id,workflow_id,task_id,role_id,requested_tier,selected_tier,reason_code,transition,attempt,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(run_id,self.workflow_id,node["id"],node["role_id"],default,selected,reason,transition,attempt,utcnow()))
         self.store.event(run_id,"routing_decision",node["id"],node["id"],role_id=node["role_id"],requested_tier=default,selected_tier=selected,reason_code=reason,transition=transition,attempt=attempt)
         return selected
 
@@ -280,24 +313,37 @@ class OrchestrationEngine:
             self.store.connection.commit()
             return
         attempt=self.store.connection.execute("SELECT COALESCE(MAX(attempt),0)+1 FROM task_attempts WHERE run_id=? AND node_id=?",(run_id,node["id"])).fetchone()[0]
-        tier=self._route(run_id,node,attempt); self._set_state(run_id,"VERIFYING" if node["id"] in {"design_critique","verify"} else "RUNNING")
+        tier=self._route(run_id,node,attempt); self._set_state(run_id,"VERIFYING" if node["role_id"] == "adversarial_verifier" else "RUNNING")
         repair_used = False
         repair_context = None
         escalation_count = 0
         while True:
             started=utcnow(); self.store.connection.execute("INSERT INTO task_attempts VALUES(?,?,?,?,?,?,?,?,?)",(run_id,node["id"],attempt,node["role_id"],tier,"RUNNING",None,started,None))
-            context={"workflow_run_id": run_id, "workflow_context": {"workflow_id": "automate", "workflow_run_id": run_id, "node_id": node["id"]}}
+            context={"workflow_run_id": run_id, "workflow_context": {"workflow_id": self.workflow_id, "workflow_run_id": run_id, "node_id": node["id"]}}
             if repair_context: context["repair_context"] = repair_context
             inputs = self._inputs(run_id, node, context)
             audit_start=len(self.authorization.audit_log)
+            prepare = getattr(self.executor, "prepare_request", None)
+            prepared: dict[str, Any] = {}
+            if prepare:
+                try:
+                    prepared = prepare(role_id=node["role_id"],task_id=node["id"],tier=tier,inputs=inputs,produces=node["produces"],attempt=attempt,actions=[action for action in node.get("actions", []) if not action["capability"].startswith("artifacts.")],task_context=context,gate_approvals=[]) or {}
+                except ProviderInputBudgetError as exc:
+                    for decision in self.authorization.audit_log[audit_start:]:
+                        self.store.event(run_id,"authorization_decision",node["id"],node["id"],**decision.as_dict())
+                    self.store.connection.execute("UPDATE task_attempts SET status='FAILED',outcome='input_budget_exceeded',finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(utcnow(),run_id,node["id"],attempt))
+                    self.store.event(run_id,"provider_input_budget_rejected",node["id"],node["id"],attempt=attempt,role_id=node["role_id"],tier=tier,estimated_input_tokens=exc.estimated_input_tokens,max_input_tokens=exc.max_input_tokens,counting_method=exc.counting_method)
+                    self._set_state(run_id,"FAILED")
+                    return
             descriptor = self.executor.attempt_descriptor(node["role_id"], tier)
             correlation_id = str(uuid.uuid4()) if descriptor else None
             if descriptor:
+                routing_transition, routing_reason = self._route_details[(node["id"], attempt)]
                 self.store.connection.execute(
-                    "INSERT INTO provider_attempts(correlation_id,run_id,node_id,attempt,provider,model,status,latency_ms,validation_errors_json,source_hashes_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (correlation_id,run_id,node["id"],attempt,descriptor["provider"],descriptor["model"],"IN_PROGRESS",0,"[]","{}",utcnow()),
+                    "INSERT INTO provider_attempts(correlation_id,run_id,workflow_id,node_id,role_id,tier,routing_transition,routing_reason,attempt,provider,model,status,max_output_tokens,max_input_tokens,estimated_input_tokens,latency_ms,validation_errors_json,source_hashes_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (correlation_id,run_id,self.workflow_id,node["id"],node["role_id"],tier,routing_transition,routing_reason,attempt,descriptor["provider"],descriptor["model"],"IN_PROGRESS",descriptor.get("max_output_tokens"),descriptor.get("max_input_tokens"),prepared.get("estimated_input_tokens"),0,"[]","{}",utcnow()),
                 )
-                self.store.event(run_id,"provider_attempt_started",node["id"],node["id"],attempt=attempt,correlation_id=correlation_id,provider=descriptor["provider"],model=descriptor["model"])
+                self.store.event(run_id,"provider_attempt_started",node["id"],node["id"],attempt=attempt,correlation_id=correlation_id,provider=descriptor["provider"],model=descriptor["model"],max_output_tokens=descriptor.get("max_output_tokens"),max_input_tokens=descriptor.get("max_input_tokens"),estimated_input_tokens=prepared.get("estimated_input_tokens"))
                 self.store.connection.commit()
             executable_actions = [action for action in node.get("actions", []) if not action["capability"].startswith("artifacts.")]
             try:
@@ -307,7 +353,7 @@ class OrchestrationEngine:
                     self.store.event(run_id,"authorization_decision",node["id"],node["id"],**decision.as_dict())
                 safe_error = {"exception_type": exc.__class__.__name__, "message": getattr(exc, "safe_message", "provider or executor request failed")}
                 if descriptor:
-                    self.store.connection.execute("UPDATE provider_attempts SET status='FAILED',safe_error_json=?,finished_at=? WHERE correlation_id=?",(json.dumps(safe_error,sort_keys=True),utcnow(),correlation_id))
+                    self.store.connection.execute("UPDATE provider_attempts SET status='FAILED',final_task_outcome='execution_error',safe_error_json=?,finished_at=? WHERE correlation_id=?",(json.dumps(safe_error,sort_keys=True),utcnow(),correlation_id))
                     self.store.event(run_id,"provider_attempt_failed",node["id"],node["id"],attempt=attempt,correlation_id=correlation_id,error=safe_error)
                 self.store.connection.execute("UPDATE task_attempts SET status='FAILED',outcome='execution_error',finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(utcnow(),run_id,node["id"],attempt))
                 self._set_state(run_id,"BLOCKED" if isinstance(exc, PermissionError) and "REQUIRE_GATE" in str(exc) else "FAILED")
@@ -319,18 +365,21 @@ class OrchestrationEngine:
             if "telemetry" in result:
                 telemetry=result["telemetry"]
                 semantic=result.get("semantic_validation") or {}
-                self.store.connection.execute("UPDATE provider_attempts SET status='SUCCEEDED',input_tokens=?,output_tokens=?,cached_tokens=?,latency_ms=?,estimated_cost=?,response_id=?,raw_output=?,validation_errors_json=?,semantic_validation_status=?,semantic_rule_ids_json=?,semantic_validation_json=?,source_hashes_json=?,finished_at=? WHERE correlation_id=?",(telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("cached_tokens"),telemetry["latency_ms"],telemetry.get("estimated_cost"),result.get("provider_response_id"),result.get("raw_output"),json.dumps(result.get("validation_errors",[])),semantic.get("status"),json.dumps(semantic.get("rule_ids",[])),json.dumps(semantic,sort_keys=True) if semantic else None,json.dumps(result.get("source_hashes",{}),sort_keys=True),utcnow(),correlation_id))
-                self.store.event(run_id,"provider_attempt_recorded",node["id"],node["id"],attempt=attempt,provider=telemetry["provider"],model=telemetry["model"],latency_ms=telemetry["latency_ms"],input_tokens=telemetry.get("input_tokens"),output_tokens=telemetry.get("output_tokens"),cached_tokens=telemetry.get("cached_tokens"),validation_errors=result.get("validation_errors",[]),semantic_validation=semantic or None,semantic_validation_status=semantic.get("status"),semantic_rule_ids=semantic.get("rule_ids",[]),repair_attempted=repair_context is not None,source_hashes=result.get("source_hashes",{}))
+                self.store.connection.execute("UPDATE provider_attempts SET status='SUCCEEDED',input_tokens=?,output_tokens=?,cached_tokens=?,cache_write_tokens=?,max_output_tokens=?,max_input_tokens=?,estimated_input_tokens=?,latency_ms=?,estimated_cost=?,response_id=?,raw_output=?,validation_errors_json=?,semantic_validation_status=?,semantic_rule_ids_json=?,semantic_validation_json=?,source_hashes_json=?,finished_at=? WHERE correlation_id=?",(telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("cached_tokens"),telemetry.get("cache_write_tokens"),telemetry.get("max_output_tokens"),telemetry.get("max_input_tokens"),telemetry.get("estimated_input_tokens"),telemetry["latency_ms"],telemetry.get("estimated_cost"),result.get("provider_response_id"),result.get("raw_output"),json.dumps(result.get("validation_errors",[])),semantic.get("status"),json.dumps(semantic.get("rule_ids",[])),json.dumps(semantic,sort_keys=True) if semantic else None,json.dumps(result.get("source_hashes",{}),sort_keys=True),utcnow(),correlation_id))
+                self.store.event(run_id,"provider_attempt_recorded",node["id"],node["id"],attempt=attempt,provider=telemetry["provider"],model=telemetry["model"],latency_ms=telemetry["latency_ms"],input_tokens=telemetry.get("input_tokens"),output_tokens=telemetry.get("output_tokens"),cached_tokens=telemetry.get("cached_tokens"),cache_write_tokens=telemetry.get("cache_write_tokens"),max_output_tokens=telemetry.get("max_output_tokens"),max_input_tokens=telemetry.get("max_input_tokens"),estimated_input_tokens=telemetry.get("estimated_input_tokens"),validation_errors=result.get("validation_errors",[]),semantic_validation=semantic or None,semantic_validation_status=semantic.get("status"),semantic_rule_ids=semantic.get("rule_ids",[]),repair_attempted=repair_context is not None,source_hashes=result.get("source_hashes",{}))
             invalid_reason=result.get("reason_code") in {"malformed_json","schema_validation_failed","provider_no_output","semantic_validation_failed"}
             if outcome=="failure" and invalid_reason:
+                if descriptor:
+                    self.store.connection.execute("UPDATE provider_attempts SET final_task_outcome=? WHERE correlation_id=?",(result["reason_code"],correlation_id))
                 self.store.connection.execute("UPDATE task_attempts SET status='INVALID_OUTPUT',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(result["reason_code"],utcnow(),run_id,node["id"],attempt))
                 semantic=result.get("semantic_validation") or {}
                 repairable=result["reason_code"] != "semantic_validation_failed" or semantic.get("repairable") is True
-                if not repair_used and repairable:
+                if not repair_used and repairable and self.MAX_REPAIR_ATTEMPTS > 0:
                     repair_used=True
                     repair_context={"original_output": result.get("raw_output"), "validation_errors": result.get("validation_errors", []), "semantic_validation": semantic, "original_output_hash": content_hash(result.get("raw_output"))}
                     self.store.connection.execute("UPDATE provider_attempts SET repair_attempted=1 WHERE run_id=? AND node_id=? AND attempt=?",(run_id,node["id"],attempt))
                     attempt+=1
+                    tier = self._route(run_id, node, attempt, tier, "provider_repair")
                     self.store.event(run_id,"provider_repair_requested",node["id"],node["id"],attempt=attempt,original_output_hash=repair_context["original_output_hash"],reason_code=result["reason_code"],semantic_rule_ids=semantic.get("rule_ids",[]))
                     continue
                 if repair_used and "telemetry" in result:
@@ -342,10 +391,12 @@ class OrchestrationEngine:
                 self.store.connection.execute("UPDATE provider_attempts SET repair_succeeded=1 WHERE run_id=? AND node_id=? AND attempt=?",(run_id,node["id"],attempt))
                 self.store.event(run_id,"provider_repair_completed",node["id"],node["id"],attempt=attempt,succeeded=True,semantic_validation_status=(result.get("semantic_validation") or {}).get("status"))
             if outcome=="escalate":
+                if descriptor:
+                    self.store.connection.execute("UPDATE provider_attempts SET final_task_outcome='escalate' WHERE correlation_id=?",(correlation_id,))
                 self.store.connection.execute("UPDATE task_attempts SET status='ESCALATED',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(outcome,utcnow(),run_id,node["id"],attempt))
                 target=self.compiled.registry["agents"][node["role_id"]].get("escalation_tier")
                 tiers=list(self.compiled.registry["enums"]["tiers"])
-                if not target or tiers.index(target) <= tiers.index(tier) or escalation_count >= 1:
+                if not target or tiers.index(target) <= tiers.index(tier) or escalation_count >= self.MAX_ESCALATIONS:
                     self.store.connection.execute("UPDATE task_attempts SET status='INSUFFICIENT_EVIDENCE',outcome='impossible_escalation',finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(utcnow(),run_id,node["id"],attempt))
                     self._set_state(run_id,"INSUFFICIENT_EVIDENCE")
                     self.store.event(run_id,"escalation_unavailable",node["id"],node["id"],attempt=attempt,current_tier=tier,requested_tier=target,reason_code="NO_HIGHER_TIER")
@@ -353,11 +404,21 @@ class OrchestrationEngine:
                 escalation_count += 1
                 attempt+=1; tier=self._route(run_id,node,attempt,target,result["reason_code"]); continue
             if outcome == "failure":
+                if descriptor:
+                    self.store.connection.execute("UPDATE provider_attempts SET final_task_outcome=? WHERE correlation_id=?",(result.get("reason_code","failure"),correlation_id))
                 self.store.connection.execute("UPDATE task_attempts SET status='FAILED',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(result.get("reason_code","failure"),utcnow(),run_id,node["id"],attempt))
                 self._set_state(run_id,"FAILED")
                 self.store.event(run_id,"task_failed",node["id"],node["id"],reason_code=result.get("reason_code","provider_failure"))
                 return
-            self._accept_artifacts(run_id, node, result["artifacts"], context)
+            try:
+                self._accept_artifacts(run_id, node, result["artifacts"], context)
+            except ValueError as exc:
+                self.store.connection.execute("UPDATE task_attempts SET status='INVALID_OUTPUT',outcome='artifact_contract_validation_failed',finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(utcnow(),run_id,node["id"],attempt))
+                self._set_state(run_id,"FAILED")
+                self.store.event(run_id,"task_failed",node["id"],node["id"],reason_code="artifact_contract_validation_failed",message=str(exc))
+                return
+            if descriptor:
+                self.store.connection.execute("UPDATE provider_attempts SET final_task_outcome=? WHERE correlation_id=?",(outcome,correlation_id))
             self.store.connection.execute("UPDATE task_attempts SET status='COMPLETED',outcome=?,finished_at=? WHERE run_id=? AND node_id=? AND attempt=?",(outcome,utcnow(),run_id,node["id"],attempt))
             self.store.event(run_id,"task_completed",node["id"],node["id"],attempt=attempt,tier=tier,outcome=outcome,duration_ms=0)
             self._move(run_id,node["id"],outcome); self._set_state(run_id,"ROUTED"); return
@@ -424,5 +485,35 @@ class OrchestrationEngine:
 
     def inspect(self, run_id: str, *, include_sensitive_evidence: bool = False) -> dict[str, Any]:
         run=self.store.run(run_id)
-        provider_columns = "*" if include_sensitive_evidence else "id,correlation_id,run_id,node_id,attempt,provider,model,status,input_tokens,output_tokens,cached_tokens,latency_ms,estimated_cost,response_id,validation_errors_json,semantic_validation_status,semantic_rule_ids_json,semantic_validation_json,repair_attempted,repair_succeeded,source_hashes_json,safe_error_json,created_at,finished_at"
+        provider_columns = "*" if include_sensitive_evidence else "id,correlation_id,run_id,workflow_id,node_id,role_id,tier,routing_transition,routing_reason,attempt,provider,model,status,final_task_outcome,input_tokens,output_tokens,cached_tokens,cache_write_tokens,max_output_tokens,max_input_tokens,estimated_input_tokens,latency_ms,estimated_cost,response_id,validation_errors_json,semantic_validation_status,semantic_rule_ids_json,semantic_validation_json,repair_attempted,repair_succeeded,source_hashes_json,safe_error_json,created_at,finished_at"
         return {"run":run,"events":self.store.events(run_id),"artifacts":[dict(r) for r in self.store.connection.execute("SELECT artifact_id,artifact_type,producer_node,content_hash,active,created_at FROM artifacts WHERE run_id=? ORDER BY created_at",(run_id,))],"gates":[dict(r) for r in self.store.connection.execute("SELECT * FROM gates WHERE run_id=? ORDER BY requested_at",(run_id,))],"routing":[dict(r) for r in self.store.connection.execute("SELECT * FROM routing_events WHERE run_id=? ORDER BY id",(run_id,))],"provider_attempts":[dict(r) for r in self.store.connection.execute(f"SELECT {provider_columns} FROM provider_attempts WHERE run_id=? ORDER BY id",(run_id,))]}
+
+    def summarize(self, run_id: str) -> dict[str, Any]:
+        attempts = [dict(row) for row in self.store.connection.execute(
+            "SELECT workflow_id,node_id,role_id,tier,routing_transition,routing_reason,attempt,provider,model,status,final_task_outcome,input_tokens,output_tokens,cached_tokens,cache_write_tokens,max_output_tokens,max_input_tokens,estimated_input_tokens,latency_ms,estimated_cost,semantic_validation_status,semantic_rule_ids_json,repair_attempted,repair_succeeded FROM provider_attempts WHERE run_id=? ORDER BY id",
+            (run_id,),
+        )]
+        calls_by_role: dict[str, int] = {}
+        for item in attempts:
+            role_id = item["role_id"] or "unknown"
+            calls_by_role[role_id] = calls_by_role.get(role_id, 0) + 1
+            item["semantic_rule_ids"] = json.loads(item.pop("semantic_rule_ids_json") or "[]")
+        costs = [item["estimated_cost"] for item in attempts]
+        return {
+            "workflow_id": self.workflow_id,
+            "run_id": run_id,
+            "final_state": self.store.run(run_id)["state"],
+            "provider_calls": len(attempts),
+            "calls_by_role": calls_by_role,
+            "input_tokens": sum(item["input_tokens"] or 0 for item in attempts),
+            "cached_tokens": sum(item["cached_tokens"] or 0 for item in attempts),
+            "cache_write_tokens": sum(item["cache_write_tokens"] or 0 for item in attempts),
+            "output_tokens": sum(item["output_tokens"] or 0 for item in attempts),
+            "latency_ms": sum(item["latency_ms"] or 0 for item in attempts),
+            "estimated_cost": sum(costs) if attempts and all(cost is not None for cost in costs) else None,
+            "repair_attempts": sum(item["repair_attempted"] for item in attempts),
+            "successful_repairs": sum(item["repair_succeeded"] for item in attempts),
+            "escalations": sum(item["routing_transition"] == "escalate" for item in attempts),
+            "validation_failures": sum(item["final_task_outcome"] in {"malformed_json", "schema_validation_failed", "provider_no_output", "semantic_validation_failed"} for item in attempts),
+            "attempts": attempts,
+        }

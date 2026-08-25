@@ -11,15 +11,18 @@ IDs or transitions.
 
 Deterministic mocks test workflow transitions, authorization, gates, persistence,
 routing, provider adaptation, canonical and semantic validation, repair,
-redaction, and crash recovery without provider network calls. Current `main`
-passes 79 offline tests.
+redaction, and crash recovery without provider network calls. The multi-role
+provider workflow feature branch passes 101 offline tests.
 
 ## Provider smoke testing
 
-The optional OpenAI smoke test is disabled by default. When explicitly enabled,
-it runs only the Architect reasoning path, sends no tools, performs no outward
-actions, and validates both declared artifacts. Provider usage, latency, attempts,
-repair, routing, and artifact validation are recorded.
+Optional OpenAI demonstrations are disabled by default. The Architect smoke path
+and the controlled `qa-provider-demo` paths send no tools, perform no outward
+actions, and validate their declared artifacts. The multi-role demonstrations
+cover both bounded ambiguity escalation and successful progression through
+Requirements Analyst, deterministic QA Intake, and Adversarial Verifier to a
+pending human `qa_signoff` gate. Provider usage, latency, attempts, repair,
+routing, artifact validation, and bounded sanitized results are recorded.
 
 ## Adversarial verification
 

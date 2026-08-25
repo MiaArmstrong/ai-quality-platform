@@ -92,6 +92,12 @@ def _check_file(root: Path, relative: str, label: str, errors: list[str]) -> Non
         errors.append(f"{label}: referenced file does not exist: {relative}")
 
 
+def _verifier_contract_drift_errors(contracts: dict[str, Any]) -> list[str]:
+    if contracts.get("verifier_result") != contracts.get("adversarial_review"):
+        return ["artifact contracts: verifier_result and adversarial_review must remain semantically identical"]
+    return []
+
+
 def _front_matter(path: Path) -> dict[str, Any]:
     lines = path.read_text(encoding="utf-8").splitlines()
     if not lines or lines[0] != "---":
@@ -169,6 +175,7 @@ def validate_registry_data(root: Path, registry: dict[str, Any], workflow_docume
                 Draft202012Validator.check_schema(contract)
             except Exception as exc:
                 errors.append(f"artifact contract {artifact_type}: invalid JSON Schema: {exc}")
+        errors.extend(_verifier_contract_drift_errors(contract_document.get("contracts", {})))
 
     for standard_id, definition in standards.items():
         _check_file(root, definition.get("standard_file", ""), f"standard {standard_id}", errors)

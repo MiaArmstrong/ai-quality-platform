@@ -36,7 +36,11 @@ for review.
 
 ## Current execution status
 
-The `automate` workflow has an executable provider-neutral runtime. Architect is
-the first real provider-backed role; offline mocks remain the default for the
-rest. Registry presence does not imply that a role already executes against a
-real provider.
+The `automate` workflow remains the default executable provider-neutral runtime.
+The opt-in `qa-provider-demo` workflow has now demonstrated real-provider
+Requirements Analyst and Adversarial Verifier steps around a canonically
+validated deterministic QA Intake step. A controlled negative path stopped on
+unresolved requirement ambiguity after bounded escalation; a controlled
+positive path reached a pending human `qa_signoff` gate, which was not
+auto-approved. The runtime remains single-runner, no real side-effect adapters
+exist, and registry presence alone still does not imply real-provider use.
