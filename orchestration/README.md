@@ -1,6 +1,7 @@
 # Executable Orchestration Vertical Slice
 
-This package compiles and executes the provider-neutral `automate` workflow.
+This package compiles and executes provider-neutral workflows. `automate`
+remains the default; `qa-provider-demo` is an explicit opt-in multi-role slice.
 The deterministic mock remains the offline default; selected read-only roles
 can be routed through a provider adapter.
 
@@ -61,11 +62,41 @@ OPENAI_API_KEY=<secret>
 AQP_OPENAI_MODEL_ECONOMY=<model-id>
 AQP_OPENAI_MODEL_STANDARD=<model-id>
 AQP_OPENAI_MODEL_HIGH_REASONING=<model-id>
+AQP_OPENAI_MAX_INPUT_TOKENS=32000
+AQP_OPENAI_MAX_OUTPUT_TOKENS=4096
+AQP_OPENAI_PRICING_JSON={"<model-id>":{"input_per_million":0,"cached_input_per_million":0,"cache_write_per_million":0,"output_per_million":0}}
 ```
 
 Telemetry records provider, model, latency, attempt, input/output tokens, cached
-tokens when available, semantic-validation status/findings/rule IDs, repair
+read and cache-write tokens when available, semantic-validation status/findings/rule IDs, repair
 attempt/success, and cost only when pricing is explicitly configured.
+
+The multi-role slice records repair and real upward escalation as distinct
+attempts and routing events. Requirements Analyst is capped at initial + one
+repair + one upward escalation (three calls). Adversarial Verifier is capped at
+initial + one repair (two calls) and cannot self-escalate at `high_reasoning`.
+Optional `AQP_OPENAI_PRICING_JSON` rates distinguish normal input, cached input,
+cache-write input, and output tokens per million. Observed estimates remain null
+when required pricing or usage data is absent.
+
+Provider request budgets are configured through `AQP_OPENAI_MAX_INPUT_TOKENS`
+and `AQP_OPENAI_MAX_OUTPUT_TOKENS`. Output limits are sent as Responses API
+`max_output_tokens`. Compiled input is checked before dispatch with `tiktoken`
+plus a fixed protocol-overhead allowance; this is a deterministic local estimate,
+not exact server token accounting. Over-budget requests are not truncated or sent.
+The multi-role demo requires 32,000 input and 4,096 output tokens per request.
+Its conservative cost ceiling is a preflight planning value, distinct from
+observed attempt cost.
+
+The controlled multi-role demonstrations exercised both a natural ambiguity
+path ending in `INSUFFICIENT_EVIDENCE` and a successful path through
+Requirements Analyst, deterministic QA Intake, and Adversarial Verifier to a
+pending `qa_signoff` gate. The gate was not auto-approved. Before temporary
+SQLite cleanup, the demo emits a bounded sanitized summary of accepted verdicts,
+selected findings, gate evidence hashes, state, and telemetry. Raw provider
+output is excluded from this summary. No side-effect adapters are enabled, the
+runtime remains single-runner, and economy-tier real-provider execution remains
+outstanding.
 
 The optional smoke test is disabled by default and runs one harmless, read-only
 Architect task with no tools or outward actions. Success requires both declared

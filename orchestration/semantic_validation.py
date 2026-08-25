@@ -56,6 +56,13 @@ class SemanticOutputValidator:
 
     ARCHITECT_SUCCESS_WITH_ESCALATION = "architect_escalation_success_conflict/v1"
     ARCHITECT_ESCALATION_UNAVAILABLE = "architect_escalation_unavailable_tier/v1"
+    REQUIREMENTS_READY_BLOCKED = "requirements_ready_with_blockers/v1"
+    REQUIREMENTS_BLOCKED_EMPTY = "requirements_blocked_without_condition/v1"
+    REQUIREMENTS_NEEDS_INFO_EMPTY = "requirements_needs_info_without_gap/v1"
+    VERIFIER_REFUTED_EMPTY = "verifier_refuted_without_claim/v1"
+    VERIFIER_SUPPORTED_CRITICAL = "verifier_supported_with_critical_concern/v1"
+    VERIFIER_INSUFFICIENT_EMPTY = "verifier_insufficient_without_gap/v1"
+    VERIFIER_CONCERNS_EMPTY = "verifier_concerns_without_concern/v1"
 
     def validate(
         self,
@@ -88,6 +95,37 @@ class SemanticOutputValidator:
                         repairable=True,
                     ))
 
+        if role_id == "requirements_analyst":
+            readiness = artifacts.get("requirements_readiness")
+            if isinstance(readiness, Mapping):
+                verdict = readiness.get("verdict")
+                blocking_gaps = any(item.get("blocks_readiness") is True for item in readiness.get("missing_information", ()) if isinstance(item, Mapping))
+                blocking_conflicts = any(item.get("blocks_readiness") is True for item in readiness.get("conflicts", ()) if isinstance(item, Mapping))
+                concrete_conditions = any(str(item.get("description", "")).strip() for item in readiness.get("blocking_conditions", ()) if isinstance(item, Mapping))
+                blockers = concrete_conditions or blocking_gaps or blocking_conflicts
+                if verdict == "READY" and blockers:
+                    findings.append(self._finding(self.REQUIREMENTS_READY_BLOCKED, "requirements_readiness", ("$.artifacts.requirements_readiness.verdict", "$.artifacts.requirements_readiness.blocking_conditions"), "READY cannot include a blocking gap, conflict, or condition."))
+                if verdict == "BLOCKED" and not blockers:
+                    findings.append(self._finding(self.REQUIREMENTS_BLOCKED_EMPTY, "requirements_readiness", ("$.artifacts.requirements_readiness.verdict", "$.artifacts.requirements_readiness.blocking_conditions"), "BLOCKED requires a concrete blocking condition."))
+                meaningful_gaps = any(str(item.get("description", "")).strip() for item in readiness.get("missing_information", ()) if isinstance(item, Mapping))
+                if verdict == "NEEDS_INFO" and not meaningful_gaps:
+                    findings.append(self._finding(self.REQUIREMENTS_NEEDS_INFO_EMPTY, "requirements_readiness", ("$.artifacts.requirements_readiness.verdict", "$.artifacts.requirements_readiness.missing_information"), "NEEDS_INFO requires at least one unresolved information gap."))
+
+        if role_id == "adversarial_verifier":
+            review = artifacts.get("verifier_result") or artifacts.get("adversarial_review")
+            review_type = "verifier_result" if "verifier_result" in artifacts else "adversarial_review"
+            if isinstance(review, Mapping):
+                verdict = review.get("verdict")
+                claims = review.get("challenged_claims", ())
+                if verdict == "REFUTED" and not any(item.get("assessment") == "REFUTED" and str(item.get("claim", "")).strip() for item in claims if isinstance(item, Mapping)):
+                    findings.append(self._finding(self.VERIFIER_REFUTED_EMPTY, review_type, (f"$.artifacts.{review_type}.verdict", f"$.artifacts.{review_type}.challenged_claims"), "REFUTED requires a concrete refuted claim."))
+                if verdict == "SUPPORTED" and any(item.get("critical") is True for item in review.get("concerns", ()) if isinstance(item, Mapping)):
+                    findings.append(self._finding(self.VERIFIER_SUPPORTED_CRITICAL, review_type, (f"$.artifacts.{review_type}.verdict", f"$.artifacts.{review_type}.concerns"), "SUPPORTED cannot contain a critical unresolved concern."))
+                if verdict == "INSUFFICIENT_EVIDENCE" and not any(str(item).strip() for item in review.get("evidence_gaps", ())):
+                    findings.append(self._finding(self.VERIFIER_INSUFFICIENT_EMPTY, review_type, (f"$.artifacts.{review_type}.verdict", f"$.artifacts.{review_type}.evidence_gaps"), "INSUFFICIENT_EVIDENCE requires a concrete evidence gap."))
+                if verdict == "SUPPORTED_WITH_CONCERNS" and not any(str(item.get("description", "")).strip() for item in review.get("concerns", ()) if isinstance(item, Mapping)):
+                    findings.append(self._finding(self.VERIFIER_CONCERNS_EMPTY, review_type, (f"$.artifacts.{review_type}.verdict", f"$.artifacts.{review_type}.concerns"), "SUPPORTED_WITH_CONCERNS requires at least one concern."))
+
         if any(item.severity == "ERROR" for item in findings):
             status = "INVALID"
         elif findings:
@@ -95,3 +133,7 @@ class SemanticOutputValidator:
         else:
             status = "VALID"
         return SemanticValidationResult(status=status, findings=tuple(findings))
+
+    @staticmethod
+    def _finding(rule_id: str, artifact_type: str, field_paths: tuple[str, ...], message: str) -> SemanticValidationFinding:
+        return SemanticValidationFinding(rule_id, artifact_type, field_paths, message, "ERROR", True)

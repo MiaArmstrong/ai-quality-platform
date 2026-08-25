@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
 
+class ProviderInputBudgetError(ValueError):
+    def __init__(self, *, estimated_input_tokens: int, max_input_tokens: int, counting_method: str):
+        self.estimated_input_tokens = estimated_input_tokens
+        self.max_input_tokens = max_input_tokens
+        self.counting_method = counting_method
+        self.safe_message = "compiled provider request exceeds the configured input-token budget"
+        super().__init__(self.safe_message)
+
+
 @dataclass(frozen=True)
 class ExecutionRequest:
     role_id: str
@@ -31,6 +40,10 @@ class ExecutionTelemetry:
     output_tokens: int | None = None
     cached_tokens: int | None = None
     estimated_cost: float | None = None
+    cache_write_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_input_tokens: int | None = None
+    estimated_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)

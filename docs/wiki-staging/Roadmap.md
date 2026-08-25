@@ -27,4 +27,7 @@ filesystem, shell, GitHub, Wiki, deployment, or ticketing side effects.
 
 Candidate roles require canonical artifact contracts, semantic invariants,
 routing and escalation behavior, telemetry, and preserved authorization
-boundaries. Architect remains the only completed real-provider role milestone.
+boundaries. Architect, Requirements Analyst, and Adversarial Verifier have now
+completed bounded real-provider demonstrations, including a multi-role path to
+the pending human `qa_signoff` gate. Issue #8 remains open because its
+economy-tier real-provider role criterion is still outstanding.

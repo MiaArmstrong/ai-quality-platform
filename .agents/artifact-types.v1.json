@@ -2,6 +2,7 @@
   "schema_version": "artifact-types/v1",
   "artifact_types": [
     "work_item",
+    "requirements_readiness",
     "sources_of_record",
     "automation_design",
     "adversarial_review",

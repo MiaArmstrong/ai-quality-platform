@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from tools.validate_contracts import ContractError, load_json, load_yaml, validate_registry_data, validate_repository
+from tools.validate_contracts import ContractError, _verifier_contract_drift_errors, load_json, load_yaml, validate_registry_data, validate_repository
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,12 @@ class ContractValidatorTests(unittest.TestCase):
 
     def test_repository_contracts_are_valid(self):
         self.assertEqual([], validate_repository(ROOT))
+
+    def test_verifier_contract_aliases_cannot_drift(self):
+        contracts = load_json(ROOT / ".agents/artifact-contracts.v1.json")["contracts"]
+        changed = copy.deepcopy(contracts)
+        changed["adversarial_review"]["properties"]["summary"]["minLength"] = 2
+        self.assertTrue(_verifier_contract_drift_errors(changed))
 
     def test_missing_referenced_file_is_rejected(self):
         registry = copy.deepcopy(self.registry)

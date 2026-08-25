@@ -1,0 +1,22 @@
+{
+  "schema_version": "workflow-definition/v1",
+  "workflow_id": "qa-provider-demo",
+  "initial_node": "requirements_analysis",
+  "required_gates": ["qa_signoff"],
+  "nodes": [
+    {"id": "requirements_analysis", "type": "task", "role_id": "requirements_analyst", "requires": ["work_item"], "produces": ["requirements_readiness", "sources_of_record"], "actions": [{"capability": "artifacts.read", "resource": "work_item"}, {"capability": "artifacts.write", "resource": "requirements_readiness"}, {"capability": "artifacts.write", "resource": "sources_of_record"}]},
+    {"id": "qa_intake", "type": "task", "role_id": "intake_analyst", "requires": ["work_item", "requirements_readiness", "sources_of_record"], "produces": ["qa_intake"], "actions": [{"capability": "artifacts.read", "resource": "work_item"}, {"capability": "artifacts.read", "resource": "requirements_readiness"}, {"capability": "artifacts.read", "resource": "sources_of_record"}, {"capability": "artifacts.write", "resource": "qa_intake"}]},
+    {"id": "adversarial_verify", "type": "task", "role_id": "adversarial_verifier", "requires": ["requirements_readiness", "qa_intake", "sources_of_record"], "produces": ["verifier_result"], "actions": [{"capability": "artifacts.read", "resource": "requirements_readiness"}, {"capability": "artifacts.read", "resource": "qa_intake"}, {"capability": "artifacts.read", "resource": "sources_of_record"}, {"capability": "artifacts.write", "resource": "verifier_result"}]},
+    {"id": "qa_signoff", "type": "gate", "gate_type": "qa_signoff", "requires": ["requirements_readiness", "qa_intake", "verifier_result"], "produces": ["human_gate_evidence"]},
+    {"id": "rework_required", "type": "state", "state": "REWORK_REQUIRED", "requires": ["human_gate_evidence"], "produces": []},
+    {"id": "completed", "type": "terminal", "state": "COMPLETED", "requires": ["human_gate_evidence"], "produces": []}
+  ],
+  "transitions": [
+    {"from": "requirements_analysis", "to": "qa_intake", "on": "success"},
+    {"from": "qa_intake", "to": "adversarial_verify", "on": "success"},
+    {"from": "adversarial_verify", "to": "qa_signoff", "on": "success"},
+    {"from": "qa_signoff", "to": "completed", "on": "approved"},
+    {"from": "qa_signoff", "to": "rework_required", "on": "rejected"},
+    {"from": "rework_required", "to": "requirements_analysis", "on": "rework"}
+  ]
+}

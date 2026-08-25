@@ -109,8 +109,14 @@ existing `automation_design` and `sources_of_record` artifacts, passed their
 canonical schemas, required no repair in the successful run, made no tool calls
 or outward actions, and stopped at the human design gate as intended.
 
-No API key or private model response is stored in this repository. Other roles
-continue to use deterministic mocks unless explicitly enabled in future work.
+No API key or private model response is stored in this repository. Requirements
+Analyst and Adversarial Verifier are now real-provider-demonstrated in the
+opt-in `qa-provider-demo` workflow. One controlled run preserved a natural
+ambiguity escalation and stopped at `INSUFFICIENT_EVIDENCE`; a second reached a
+pending human `qa_signoff` gate without auto-approval. QA Intake remains
+deterministic and is canonically validated before acceptance. No real
+side-effect adapters are enabled, and an economy-tier real-provider role remains
+outstanding under Issue #8.
 
 ## Adversarial verification
 
@@ -135,8 +141,8 @@ The validation stack includes:
 - adversarial review and targeted negative tests;
 - an optional, explicitly enabled real-provider smoke test.
 
-Current `main` passes **79 offline tests**. The real-provider test is opt-in and
-is not part of ordinary offline validation.
+This feature branch passes **101 offline tests**. Real-provider tests are opt-in
+and are not part of ordinary offline validation.
 
 ## Repository structure
 
@@ -166,7 +172,9 @@ Tracked follow-up work is deliberately separated from implemented behavior:
 This is active, experimental portfolio engineering work. It demonstrates a
 tested architectural foundation; it is not production-ready software. The
 runtime is intentionally single-runner, real side-effect adapters are absent,
-and only the Architect provider path has completed a real-model milestone.
+and Architect, Requirements Analyst, and Adversarial Verifier have completed
+bounded real-provider milestones. Economy-tier real-provider execution remains
+outstanding.
 
 ---
 
